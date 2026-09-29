@@ -1,1532 +1,378 @@
 <?php
-
 session_start();
 
 require_once __DIR__ . "/../config/database.php";
-require_once __DIR__ . "/../includes/icons.php";
-require_once __DIR__ . "/../includes/chat.php";
-require_once __DIR__ . "/../includes/paymongo.php";
-require_once __DIR__ . "/../includes/activity.php";
+require_once __DIR__ . "/../includes/customer-shell.php";
+require_once __DIR__ . "/../includes/hero-scenes.php";
 
-ensure_chat_schema($pdo);
-$inboxUnread = chat_unread_for_customer($pdo, (int) ($_SESSION["user_id"] ?? 0));
+$me = customer_boot($pdo);
+$userId = (int) $me["id"];
 
+// online payments finished (or given up) on PayMongo since the guest last came by
+paymongo_settle_pending($pdo, $userId);
 
-// ======================================================
-// CUSTOMER LOGIN REQUIRED
-// ======================================================
-
-if (
-    !isset($_SESSION["user_id"])
-    || ($_SESSION["role"] ?? "") !== "customer"
-) {
-    header("Location: ../login.php");
-    exit;
-}
-
-$user_id = (int) $_SESSION["user_id"];
-
-// Online payments that were paid (or abandoned) since the customer left PayMongo
-paymongo_settle_pending($pdo, $user_id);
+$counts = customer_counts($pdo, $userId);
 
 
 // ======================================================
-// GET CURRENT USER INFORMATION
-// ======================================================
-
-$stmtUser = $pdo->prepare("
-    SELECT *
-    FROM users
-    WHERE id = ?
-    LIMIT 1
-");
-
-$stmtUser->execute([$user_id]);
-
-$currentUser = $stmtUser->fetch();
-
-if (!$currentUser) {
-
-    session_destroy();
-
-    header("Location: ../login.php");
-
-    exit;
-}
-
-
-// ======================================================
-// HANDLE RESERVATION CANCELLATION
-// ======================================================
-
-if (
-    $_SERVER["REQUEST_METHOD"] === "POST"
-    && isset($_POST["cancel_reservation"])
-) {
-
-    $reservation_id =
-        (int) ($_POST["reservation_id"] ?? 0);
-
-
-    if ($reservation_id > 0) {
-
-        $stmt = $pdo->prepare("
-            UPDATE reservations
-
-            SET status = 'cancelled'
-
-            WHERE id = ?
-            AND user_id = ?
-            AND status = 'pending'
-
-            AND NOT EXISTS (
-                SELECT 1
-                FROM payments
-
-                WHERE payments.reservation_id =
-                    reservations.id
-
-                AND payments.status = 'verified'
-            )
-        ");
-
-        $stmt->execute([
-            $reservation_id,
-            $user_id
-        ]);
-
-        // shows up in the admin's notifications and activity log
-        if ($stmt->rowCount() > 0) {
-
-            $cancelled = $pdo->prepare("
-                SELECT rooms.room_name, reservations.check_in, reservations.check_out
-                FROM reservations
-                INNER JOIN rooms ON rooms.id = reservations.room_id
-                WHERE reservations.id = ?
-            ");
-
-            $cancelled->execute([$reservation_id]);
-            $cancelled = $cancelled->fetch();
-
-            log_activity(
-                $pdo,
-                "reservation.cancelled",
-                ($_SESSION["full_name"] ?? "A customer") . " cancelled reservation #" . $reservation_id
-                    . ($cancelled
-                        ? " (" . $cancelled["room_name"] . ", " . date("M j", strtotime($cancelled["check_in"]))
-                            . " to " . date("M j", strtotime($cancelled["check_out"])) . ")"
-                        : ""),
-                [
-                    "entity_type" => "reservation",
-                    "entity_id" => $reservation_id,
-                    "link" => "reservations.php?q=" . $reservation_id,
-                    "notify" => true,
-                ]
-            );
-        }
-    }
-
-
-    header("Location: dashboard.php");
-
-    exit;
-}
-
-
-// ======================================================
-// GET CUSTOMER RESERVATIONS
-// ONLY GET LATEST PAYMENT FOR EACH RESERVATION
+// THE GUEST'S RESERVATIONS, WITH THEIR LATEST PAYMENT
 // ======================================================
 
 $stmt = $pdo->prepare("
-    SELECT
-        reservations.*,
-        rooms.room_name,
-
-        (
-            SELECT payments.status
-            FROM payments
-
-            WHERE payments.reservation_id =
-                reservations.id
-
-            AND payments.user_id =
-                reservations.user_id
-
-            ORDER BY payments.id DESC
-
-            LIMIT 1
-        ) AS payment_status,
-
-        (
-            SELECT payments.id
-            FROM payments
-
-            WHERE payments.reservation_id =
-                reservations.id
-
-            AND payments.user_id =
-                reservations.user_id
-
-            ORDER BY payments.id DESC
-
-            LIMIT 1
-        ) AS payment_id
-
-    FROM reservations
-
-    INNER JOIN rooms
-        ON reservations.room_id =
-            rooms.id
-
-    WHERE reservations.user_id = ?
-
-    ORDER BY reservations.created_at DESC
+    SELECT r.*, rooms.room_name, lp.status AS payment_status, lp.payment_method
+    FROM reservations r
+    INNER JOIN rooms ON rooms.id = r.room_id
+    " . CUSTOMER_LATEST_PAYMENT . "
+    WHERE r.user_id = ?
+    ORDER BY r.created_at DESC, r.id DESC
 ");
-
-$stmt->execute([$user_id]);
-
+$stmt->execute([$userId]);
 $reservations = $stmt->fetchAll();
 
-?>
-
-<!DOCTYPE html>
-<html lang="en">
-
-<head>
-
-    <meta charset="UTF-8">
-
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0, viewport-fit=cover"
-    >
-
-    <meta
-        name="theme-color"
-        content="#fffaf4"
-    >
-
-    <title>
-        Customer Dashboard | ARVE'S House
-    </title>
-
-    <style>
-
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-
-        html {
-            scroll-behavior: smooth;
-            -webkit-tap-highlight-color: transparent;
-            -webkit-text-size-adjust: 100%;
-            text-size-adjust: 100%;
-        }
-
-        :root {
-            --cream: #fffaf4;
-            --cream-2: #f4e7d9;
-            --brown: #7a4f36;
-            --brown-dark: #513421;
-            --gold: #d4a76a;
-            --text: #241a15;
-            --muted: #786d66;
-            --white: rgba(255,255,255,.92);
-            --border: rgba(122,79,54,.14);
-            --shadow:
-                0 18px 50px
-                rgba(76,50,34,.10);
-
-            /* motion tokens */
-            --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
-            --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
-            --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
-        }
-
-        body {
-            font-family:
-                Arial,
-                Helvetica,
-                sans-serif;
-
-            color:
-                var(--text);
-
-            background:
-                radial-gradient(
-                    circle at 8% 10%,
-                    rgba(212,167,106,.22),
-                    transparent 28%
-                ),
-                radial-gradient(
-                    circle at 92% 45%,
-                    rgba(122,79,54,.11),
-                    transparent 28%
-                ),
-                linear-gradient(
-                    135deg,
-                    #fffdf9 0%,
-                    #f8f0e6 48%,
-                    #eee0d1 100%
-                );
-
-            min-height: 100vh;
-            min-height: 100svh;
-        }
-
-        a {
-            color: inherit;
-        }
-
-        .navbar {
-            min-height: 78px;
-            padding: 0 7%;
-            padding-top: env(safe-area-inset-top, 0px);
-            padding-left: max(7%, env(safe-area-inset-left, 0px));
-            padding-right: max(7%, env(safe-area-inset-right, 0px));
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 18px;
-            position: sticky;
-            top: 0;
-            z-index: 1000;
-            background:
-                rgba(255,250,244,.90);
-            backdrop-filter: blur(16px);
-            border-bottom:
-                1px solid
-                var(--border);
-        }
-
-        .brand {
-            display: flex;
-            align-items: center;
-            gap: 11px;
-            text-decoration: none;
-            color: var(--text);
-            font-size: 21px;
-            font-weight: 800;
-        }
-
-        .brand-mark {
-            width: 43px;
-            height: 43px;
-            border-radius: 13px;
-            display: grid;
-            place-items: center;
-            background:
-                linear-gradient(
-                    135deg,
-                    var(--brown),
-                    var(--brown-dark)
-                );
-            color: white;
-            box-shadow:
-                0 8px 20px
-                rgba(90,56,38,.20);
-        }
-
-        .brand small {
-            display: block;
-            color: var(--muted);
-            font-size: 9px;
-            font-weight: normal;
-            letter-spacing: 1.2px;
-        }
-
-        .nav-right {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-
-        .nav-right > a {
-            text-decoration: none;
-            padding: 9px 12px;
-            border-radius: 9px;
-            font-size: 13px;
-            font-weight: 700;
-            touch-action: manipulation;
-            transition:
-                transform 140ms var(--ease-out),
-                background-color 180ms ease,
-                color 180ms ease;
-        }
-
-        @media (hover: hover) and (pointer: fine) {
-
-            .nav-right > a:hover {
-                background:
-                    rgba(122,79,54,.08);
-                color: var(--brown);
-            }
-        }
-
-        .nav-right > a:not(.logout-link):focus-visible {
-            background:
-                rgba(122,79,54,.08);
-            color: var(--brown);
-        }
-
-        .nav-right > a:active {
-            transform: scale(0.97);
-        }
-
-        .profile-link {
-            display: flex;
-            align-items: center;
-            gap: 9px;
-            text-decoration: none;
-            padding: 5px 8px !important;
-        }
-
-        .nav-profile-image,
-        .nav-profile-placeholder {
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
-            border:
-                2px solid
-                rgba(122,79,54,.18);
-        }
-
-        .nav-profile-image {
-            object-fit: cover;
-        }
-
-        .nav-profile-placeholder {
-            display: grid;
-            place-items: center;
-            background:
-                rgba(122,79,54,.10);
-        }
-
-        .profile-name {
-            font-size: 12px;
-            font-weight: 800;
-        }
-
-        .logout-link {
-            background:
-                linear-gradient(
-                    135deg,
-                    var(--brown),
-                    var(--brown-dark)
-                );
-            color: white !important;
-        }
-
-        .container {
-            width: 90%;
-            /* viewport-fit=cover: keep cards clear of the notch in landscape (desktop: env()=0, unchanged) */
-            width: min(90%, calc(100% - 2 * max(env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px))));
-            max-width: 1180px;
-            margin:
-                42px auto 70px;
-        }
-
-        .welcome {
-            display: grid;
-            grid-template-columns:
-                1fr auto;
-            align-items: center;
-            gap: 24px;
-            padding: 28px;
-            margin-bottom: 30px;
-            border:
-                1px solid
-                rgba(255,255,255,.90);
-            border-radius: 24px;
-            background:
-                rgba(255,255,255,.88);
-            backdrop-filter: blur(14px);
-            box-shadow: var(--shadow);
-        }
-
-        .welcome-badge {
-            display: inline-block;
-            margin-bottom: 9px;
-            color: var(--brown);
-            font-size: 10px;
-            font-weight: 800;
-            text-transform: uppercase;
-            letter-spacing: 3px;
-        }
-
-        .welcome h1 {
-            font-family:
-                Georgia,
-                "Times New Roman",
-                serif;
-            font-size:
-                clamp(
-                    32px,
-                    4vw,
-                    44px
-                );
-            margin-bottom: 7px;
-        }
-
-        .welcome p {
-            color: var(--muted);
-            font-size: 13px;
-            margin-bottom: 4px;
-        }
-
-        .welcome-side {
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
-            justify-content: flex-end;
-        }
-
-        .btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            min-height: 44px;
-            padding: 0 16px;
-            border: none;
-            border-radius: 10px;
-            text-decoration: none;
-            cursor: pointer;
-            font-size: 12px;
-            font-weight: 800;
-            touch-action: manipulation;
-            -webkit-user-select: none;
-            user-select: none;
-            transition:
-                transform 140ms var(--ease-out);
-        }
-
-        @media (hover: hover) and (pointer: fine) {
-
-            .btn:hover {
-                transform: translateY(-1px);
-            }
-        }
-
-        .btn:active:not(:disabled):not([aria-disabled="true"]) {
-            transform: translateY(0) scale(0.97);
-        }
-
-        .btn-primary {
-            background:
-                linear-gradient(
-                    135deg,
-                    var(--brown),
-                    var(--brown-dark)
-                );
-            color: white;
-            box-shadow:
-                0 8px 20px
-                rgba(90,56,38,.16);
-        }
-
-        .btn-secondary {
-            background:
-                rgba(255,255,255,.70);
-            color: var(--brown-dark);
-            border:
-                1px solid
-                var(--border);
-        }
-
-        .btn-danger {
-            background: #dc2626;
-            color: white;
-        }
-
-        .section-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: end;
-            gap: 20px;
-            margin-bottom: 18px;
-        }
-
-        .section-header span {
-            color: var(--brown);
-            font-size: 10px;
-            font-weight: 800;
-            text-transform: uppercase;
-            letter-spacing: 3px;
-        }
-
-        .section-title {
-            margin-top: 5px;
-            font-family:
-                Georgia,
-                "Times New Roman",
-                serif;
-            font-size: 30px;
-        }
-
-        .section-header p {
-            color: var(--muted);
-            font-size: 12px;
-        }
-
-        .reservation-card {
-            margin-bottom: 20px;
-            overflow: hidden;
-            border:
-                1px solid
-                rgba(255,255,255,.90);
-            border-radius: 20px;
-            background:
-                rgba(255,255,255,.90);
-            backdrop-filter: blur(12px);
-            box-shadow: var(--shadow);
-        }
-
-        .reservation-top {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 15px;
-            padding: 20px 22px;
-            border-bottom:
-                1px solid
-                var(--border);
-            background:
-                linear-gradient(
-                    135deg,
-                    rgba(255,250,244,.95),
-                    rgba(244,231,217,.65)
-                );
-        }
-
-        .reservation-top h3 {
-            font-family:
-                Georgia,
-                "Times New Roman",
-                serif;
-            font-size: 21px;
-            margin-bottom: 3px;
-        }
-
-        .reservation-id {
-            color: var(--muted);
-            font-size: 11px;
-        }
-
-        .reservation-body {
-            padding: 20px 22px 22px;
-        }
-
-        .details {
-            display: grid;
-            grid-template-columns:
-                repeat(3, 1fr);
-            gap: 12px;
-        }
-
-        .detail-box {
-            padding: 13px;
-            border:
-                1px solid
-                var(--border);
-            border-radius: 11px;
-            background:
-                rgba(255,250,244,.58);
-        }
-
-        .detail-box span {
-            display: block;
-            margin-bottom: 5px;
-            color: var(--muted);
-            font-size: 10px;
-            text-transform: uppercase;
-            letter-spacing: .5px;
-        }
-
-        .detail-box strong,
-        .detail-box div {
-            color: var(--text);
-            font-size: 13px;
-        }
-
-        .status-row {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            flex-wrap: wrap;
-            margin-top: 16px;
-        }
-
-        .status,
-        .payment-pill {
-            display: inline-flex;
-            align-items: center;
-            min-height: 28px;
-            padding: 0 10px;
-            border-radius: 20px;
-            font-size: 10px;
-            font-weight: 800;
-        }
-
-        .pending {
-            background: #fef3c7;
-            color: #92400e;
-        }
-
-        .confirmed {
-            background: #d1fae5;
-            color: #065f46;
-        }
-
-        .declined {
-            background: #fee2e2;
-            color: #991b1b;
-        }
-
-        .cancelled {
-            background: #e5e7eb;
-            color: #374151;
-        }
-
-        .completed {
-            background: #dbeafe;
-            color: #1e40af;
-        }
-
-        .payment-verified {
-            background: #dcfce7;
-            color: #166534;
-        }
-
-        .payment-pending {
-            background: #fff7ed;
-            color: #9a3412;
-        }
-
-        .payment-rejected {
-            background: #fee2e2;
-            color: #991b1b;
-        }
-
-        .payment-none {
-            background: #f3f4f6;
-            color: #6b7280;
-        }
-
-        .actions {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            flex-wrap: wrap;
-            margin-top: 18px;
-        }
-
-        .empty {
-            padding: 45px 25px;
-            text-align: center;
-            border:
-                1px solid
-                rgba(255,255,255,.90);
-            border-radius: 20px;
-            background:
-                rgba(255,255,255,.88);
-            box-shadow: var(--shadow);
-        }
-
-        .empty h3 {
-            font-family:
-                Georgia,
-                "Times New Roman",
-                serif;
-            font-size: 23px;
-            margin-bottom: 8px;
-        }
-
-        .empty p {
-            color: var(--muted);
-            font-size: 13px;
-            margin-bottom: 18px;
-        }
-
-        footer {
-            margin-top: 70px;
-            padding: 35px 7% 22px;
-            padding-bottom: calc(22px + env(safe-area-inset-bottom, 0px));
-            padding-left: max(7%, env(safe-area-inset-left, 0px));
-            padding-right: max(7%, env(safe-area-inset-right, 0px));
-            background: #2d1d16;
-            color: #d8c9bf;
-        }
-
-        .footer-inner {
-            max-width: 1180px;
-            margin: auto;
-            display: flex;
-            justify-content: space-between;
-            gap: 30px;
-            align-items: center;
-        }
-
-        footer h3 {
-            font-family:
-                Georgia,
-                "Times New Roman",
-                serif;
-            color: white;
-            margin-bottom: 3px;
-        }
-
-        footer p {
-            font-size: 11px;
-            color: #bdaea5;
-        }
-
-        @media (max-width: 850px) {
-
-            .navbar {
-                padding:
-                    14px 5%;
-                padding-top: calc(14px + env(safe-area-inset-top, 0px));
-                padding-left: max(5%, env(safe-area-inset-left, 0px));
-                padding-right: max(5%, env(safe-area-inset-right, 0px));
-                align-items: flex-start;
-            }
-
-            .nav-right {
-                justify-content: flex-end;
-            }
-
-            .profile-name {
-                display: none;
-            }
-
-            .welcome {
-                grid-template-columns: 1fr;
-            }
-
-            .welcome-side {
-                justify-content: flex-start;
-            }
-
-            .details {
-                grid-template-columns:
-                    repeat(2, 1fr);
-            }
-
-            .section-header {
-                flex-direction: column;
-                align-items: flex-start;
-            }
-        }
-
-        @media (max-width: 620px) {
-
-            .brand small {
-                display: none;
-            }
-
-            .nav-right > a:not(.profile-link):not(.logout-link) {
-                display: none;
-            }
-
-            .container {
-                width: 92%;
-                margin-top: 25px;
-            }
-
-            .details {
-                grid-template-columns: 1fr;
-            }
-
-            .reservation-top {
-                align-items: flex-start;
-                flex-direction: column;
-            }
-
-            .footer-inner {
-                flex-direction: column;
-                align-items: flex-start;
-            }
-        }
-
-        @media (prefers-reduced-motion: reduce) {
-
-            html {
-                scroll-behavior: auto;
-            }
-
-            /* keep color fades; drop hover lift + press scale */
-            .btn:hover,
-            .btn:active,
-            .nav-right > a:active {
-                transform: none !important;
-            }
-
-            *,
-            *::before,
-            *::after {
-                animation-duration: 1ms !important;
-                animation-iteration-count: 1 !important;
-            }
-        }
-
-    </style>
-
-<style>
-/* Phone polish: keep the brand on one line and the header actions side by side */
-@media (max-width: 560px) {
-    .brand { font-size: 17px; gap: 9px; }
-    .brand-mark { width: 36px; height: 36px; border-radius: 11px; }
-    .nav-right { flex-wrap: nowrap; }
-}
-
-/* Compact reservation boxes */
-
-/* the payment pill is a span inside .detail-box, which made it a block label; keep it a pill */
-.detail-box .payment-pill {
-    display: inline-flex;
-    align-items: center;
-    margin-bottom: 0;
-    letter-spacing: normal;
-}
-
-@media (min-width: 901px) {
-    /* all six details on one row */
-    .details { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
-    .reservation-top { padding: 16px 20px; }
-    .reservation-body { padding: 16px 20px 18px; }
-    .detail-box { padding: 10px 12px; }
-    .actions { margin-top: 14px; }
-}
-
-@media (max-width: 620px) {
-    .reservation-card { margin-bottom: 14px; border-radius: 16px; }
-
-    .reservation-top {
-        flex-direction: row;
-        align-items: center;
-        gap: 10px;
-        padding: 13px 15px;
+// the next stay: booked or waiting, not over yet, the soonest first
+$nextStay = null;
+
+foreach ($reservations as $reservation) {
+    if (
+        in_array($reservation["status"], ["pending", "confirmed"], true)
+        && $reservation["check_out"] > date("Y-m-d")
+        && ($nextStay === null || $reservation["check_in"] < $nextStay["check_in"])
+    ) {
+        $nextStay = $reservation;
     }
+}
 
-    .reservation-top h3 { font-size: 17px; margin-bottom: 1px; }
-    .reservation-top .status { flex: none; }
+$stmt = $pdo->prepare("
+    SELECT COALESCE(SUM(total_nights), 0) FROM reservations
+    WHERE user_id = ? AND status IN ('confirmed', 'completed')
+");
+$stmt->execute([$userId]);
+$nights = (int) $stmt->fetchColumn();
 
-    .reservation-body { padding: 12px 15px 15px; }
+$stmt = $pdo->prepare("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE user_id = ? AND status = 'verified'");
+$stmt->execute([$userId]);
+$paid = (float) $stmt->fetchColumn();
 
-    .details { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+$history = customer_events($pdo, $userId, 8, false);
 
-    .detail-box { padding: 8px 10px; border-radius: 9px; }
-    .detail-box span { margin-bottom: 2px; font-size: 9px; letter-spacing: .3px; }
-    .detail-box strong, .detail-box div { font-size: 12.5px; }
+// waiting for the guest: the first one with something in it stands out
+$todo = [
+    [$counts["to_pay"], "Waiting for your payment", "To pay", "credit-card", "amber", "reservations.php?show=to_pay"],
+    [$counts["checking"], "Payments being checked", "Checking", "clock", "cyan", "payments.php"],
+    [$counts["unread_messages"], "New messages from us", "Messages", "message", "green", "messages.php#latest"],
+    [$counts["unread_updates"], "New updates", "Updates", "bell", "violet", "notifications.php"],
+];
 
-    /* Total amount: two columns; Payment: full row with the pill on the right */
-    .detail-box:nth-child(5) { grid-column: span 2; }
+$featured = null;
 
-    .detail-box:nth-child(6) {
-        grid-column: 1 / -1;
+foreach ($todo as $index => $item) {
+    if ($item[0] > 0) {
+        $featured = $index;
+        break;
+    }
+}
+
+customer_shell_head([
+    "title" => "Dashboard",
+    "subtitle" => "Welcome back, " . customer_first_name($me),
+    "active" => "dashboard",
+]);
+?>
+<style>
+    .dash-actions {
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
         justify-content: space-between;
-        gap: 8px;
+        gap: 12px;
     }
 
-    .detail-box:nth-child(6) > span { margin-bottom: 0; }
-    .detail-box:nth-child(6) > div { display: flex; }
-    .detail-box .payment-pill { min-height: 24px; margin: 0; }
+    .dash-actions p {
+        margin: 0;
+        color: var(--text-2);
+    }
 
-    .actions { gap: 8px; margin-top: 12px; }
-    .actions > .btn, .actions > form { flex: 1; }
-    .actions form .btn { width: 100%; }
-    .actions .btn { min-height: 40px; padding: 0 10px; white-space: nowrap; }
-}
+    .help-card {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+    }
+
+    .help-card p {
+        margin: 0;
+        color: var(--text-2);
+    }
+
+    @media (max-width: 767px) {
+        .dash-actions {
+            display: none;
+        }
+    }
 </style>
-<?php require __DIR__ . "/../includes/glass.php"; ?>
-<style>
-/* Messages: envelope button in the header (visible on phones too) */
-.msg-link {
-    position: relative;
-    display: inline-grid !important;
-    place-items: center;
-    width: 42px;
-    height: 42px;
-    border-radius: 999px;
-    border: 1px solid var(--border, rgba(122,79,54,.14));
-    background: rgba(255, 250, 244, 0.7);
-    color: var(--brown-dark, #513421);
-    text-decoration: none;
-}
-.msg-link svg { display: block; }
-.msg-count {
-    position: absolute;
-    top: -4px;
-    right: -4px;
-    min-width: 19px;
-    height: 19px;
-    padding: 0 5px;
-    border: 2px solid #fff;
-    border-radius: 999px;
-    background: #dc2626;
-    color: #fff;
-    font: 800 10px/15px Arial, sans-serif;
-    text-align: center;
-}
-@media (max-width: 420px) {
-    .brand { font-size: 15px; white-space: nowrap; }
-    .brand-mark { width: 34px; height: 34px; }
-    .nav-right { gap: 6px; }
-    .msg-link { width: 40px; height: 40px; }
-}
-.btn .msg-count, .mini-link .msg-count { position: static; display: inline-block; margin-left: 6px; border: 0; line-height: 19px; }
-</style>
-</head>
+<?php customer_shell_body(); ?>
 
-<body>
+<div class="stack">
 
-
-<nav class="navbar">
-
-    <a
-        href="../index.php"
-        class="brand"
-    >
-        <span class="brand-mark">
-            <?= icon("home") ?>
-        </span>
-
-        <span>
-            ARVE'S House
-
-            <small>
-                YOUR HOME AWAY FROM HOME
-            </small>
-        </span>
-    </a>
-
-
-    <div class="nav-right">
-
-        <a href="../index.php">
-            Home
-        </a>
-
-        <a href="../rooms.php">
-            Rooms
-        </a>
-
-        <a href="dashboard.php">
-            My Reservations
-        </a>
-        <a href="messages.php" class="msg-link" aria-label="Messages"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg><?php if ($inboxUnread > 0): ?><span class="msg-count"><?= $inboxUnread > 9 ? "9+" : $inboxUnread ?></span><?php endif; ?></a>
-
-
-        <a
-            href="profile.php"
-            class="profile-link"
-        >
-
-            <?php if (
-                !empty(
-                    $currentUser["profile_image"]
-                )
-            ): ?>
-
-                <img
-                    src="../<?= htmlspecialchars(
-                        $currentUser["profile_image"]
-                    ) ?>"
-                    alt="Profile Picture"
-                    class="nav-profile-image"
-                >
-
-            <?php else: ?>
-
-                <span
-                    class="nav-profile-placeholder"
-                >
-                    <?= icon("user") ?>
-                </span>
-
-            <?php endif; ?>
-
-
-            <span class="profile-name">
-
-                <?= htmlspecialchars(
-                    $currentUser["name"]
-                    ?? $currentUser["full_name"]
-                    ?? "Profile"
-                ) ?>
-
-            </span>
-
-        </a>
-
-
-        <a
-            href="../logout.php"
-            class="logout-link"
-        >
-            Logout
-        </a>
-
+    <div class="dash-actions">
+        <p>Your bookings, payments and messages with ARVE'S House, in one place.</p>
+        <a class="btn btn-primary" href="../rooms.php"><?= icon("plus") ?> Book a room</a>
     </div>
 
-</nav>
 
+    <!-- NUMBERS -->
 
-<div class="container">
+    <section class="stats" aria-label="Your stays">
 
+        <a class="stat tone-blue" href="reservations.php?show=upcoming">
+            <div class="stat-main">
+                <div class="stat-label">Upcoming stays</div>
+                <div class="stat-value"><?= number_format($counts["upcoming"]) ?></div>
+                <div class="stat-note">Booked, still to come</div>
+            </div>
+            <div class="stat-icon"><?= icon("calendar") ?></div>
+        </a>
 
-    <section class="welcome">
+        <a class="stat tone-violet" href="reservations.php">
+            <div class="stat-main">
+                <div class="stat-label">Reservations</div>
+                <div class="stat-value"><?= number_format($counts["reservations"]) ?></div>
+                <div class="stat-note">Since you joined</div>
+            </div>
+            <div class="stat-icon"><?= icon("clipboard") ?></div>
+        </a>
 
-        <div>
+        <a class="stat tone-cyan" href="reservations.php?show=past">
+            <div class="stat-main">
+                <div class="stat-label">Nights with us</div>
+                <div class="stat-value"><?= number_format($nights) ?></div>
+                <div class="stat-note">Confirmed and completed</div>
+            </div>
+            <div class="stat-icon"><?= icon("moon") ?></div>
+        </a>
 
-            <span class="welcome-badge">
-                Customer Portal
-            </span>
-
-            <h1>
-                Welcome back,
-                <?= htmlspecialchars(
-                    $currentUser["name"]
-                    ?? $currentUser["full_name"]
-                    ?? "Customer"
-                ) ?>
-            </h1>
-
-            <p>
-                Manage your reservations,
-                payment status and upcoming stays
-                from one place.
-            </p>
-
-        </div>
-
-
-        <div class="welcome-side">
-
-            <a
-                href="../rooms.php"
-                class="btn btn-primary"
-            >
-                ＋ Book Another Room
-            </a>
-
-            <a
-                href="profile.php"
-                class="btn btn-secondary"
-            >
-                My Profile
-            </a>
-
-            <a href="messages.php" class="btn btn-secondary">Messages <?php if ($inboxUnread > 0): ?><span class="msg-count"><?= $inboxUnread > 9 ? "9+" : $inboxUnread ?></span><?php endif; ?></a>
-
-        </div>
+        <a class="stat tone-green" href="payments.php">
+            <div class="stat-main">
+                <div class="stat-label">Total paid</div>
+                <div class="stat-value"><?= h(peso($paid)) ?></div>
+                <div class="stat-note">Payments accepted</div>
+            </div>
+            <div class="stat-icon"><?= icon("wallet") ?></div>
+        </a>
 
     </section>
 
 
-    <div class="section-header">
-
-        <div>
-
-            <span>
-                Your Stays
-            </span>
-
-            <h2 class="section-title">
-                My Reservations
-            </h2>
-
-        </div>
-
-        <p>
-            <?= count($reservations) ?>
-            reservation<?= count($reservations) === 1 ? "" : "s" ?>
-        </p>
-
-    </div>
-
-
-    <?php if (
-        count($reservations) > 0
-    ): ?>
-
-
-        <?php foreach (
-            $reservations
-            as $reservation
-        ): ?>
-
-
-            <?php
-
-            $status =
-                $reservation["status"];
-
-            $paymentStatus =
-                $reservation["payment_status"]
-                ?? null;
-
-
-            $payableReservation =
-                !in_array(
-                    $status,
-                    [
-                        "cancelled",
-                        "declined",
-                        "completed"
-                    ],
-                    true
-                );
-
-
-            $canCancel =
-                $status === "pending"
-                &&
-                $paymentStatus !== "verified";
-
-            ?>
-
-
-            <article class="reservation-card">
-
-
-                <div class="reservation-top">
-
-                    <div>
-
-                        <h3>
-                            <?= htmlspecialchars(
-                                $reservation["room_name"]
-                            ) ?>
-                        </h3>
-
-                        <div class="reservation-id">
-                            Reservation
-                            #<?= (int)
-                                $reservation["id"]
-                            ?>
-                        </div>
-
-                    </div>
-
-
-                    <span
-                        class="status <?= htmlspecialchars(
-                            $status
-                        ) ?>"
-                    >
-                        <?= ucfirst(
-                            htmlspecialchars(
-                                $status
-                            )
-                        ) ?>
-                    </span>
-
-                </div>
-
-
-                <div class="reservation-body">
-
-
-                    <div class="details">
-
-
-                        <div class="detail-box">
-
-                            <span>
-                                Check-in
-                            </span>
-
-                            <strong>
-                                <?= htmlspecialchars(
-                                    $reservation["check_in"]
-                                ) ?>
-                            </strong>
-
-                        </div>
-
-
-                        <div class="detail-box">
-
-                            <span>
-                                Check-out
-                            </span>
-
-                            <strong>
-                                <?= htmlspecialchars(
-                                    $reservation["check_out"]
-                                ) ?>
-                            </strong>
-
-                        </div>
-
-
-                        <div class="detail-box">
-
-                            <span>
-                                Guests
-                            </span>
-
-                            <strong>
-                                <?= (int)
-                                    $reservation["guests"]
-                                ?>
-                            </strong>
-
-                        </div>
-
-
-                        <div class="detail-box">
-
-                            <span>
-                                Total Nights
-                            </span>
-
-                            <strong>
-                                <?= (int)
-                                    $reservation["total_nights"]
-                                ?>
-                            </strong>
-
-                        </div>
-
-
-                        <div class="detail-box">
-
-                            <span>
-                                Total Amount
-                            </span>
-
-                            <strong>
-                                ₱<?= number_format(
-                                    (float)
-                                    $reservation["total_amount"],
-                                    2
-                                ) ?>
-                            </strong>
-
-                        </div>
-
-
-                        <div class="detail-box">
-
-                            <span>
-                                Payment
-                            </span>
-
-                            <div>
-
-                                <?php if (
-                                    $paymentStatus === "verified"
-                                ): ?>
-
-                                    <span
-                                        class="
-                                            payment-pill
-                                            payment-verified
-                                        "
-                                    >
-                                        ✓ Verified
-                                    </span>
-
-                                <?php elseif (
-                                    $paymentStatus === "pending"
-                                ): ?>
-
-                                    <span
-                                        class="
-                                            payment-pill
-                                            payment-pending
-                                        "
-                                    >
-                                        <?= icon("clock") ?> Waiting Verification
-                                    </span>
-
-                                <?php elseif (
-                                    $paymentStatus === "rejected"
-                                ): ?>
-
-                                    <span
-                                        class="
-                                            payment-pill
-                                            payment-rejected
-                                        "
-                                    >
-                                        ✕ Rejected
-                                    </span>
-
-                                <?php else: ?>
-
-                                    <span
-                                        class="
-                                            payment-pill
-                                            payment-none
-                                        "
-                                    >
-                                        Not yet paid
-                                    </span>
-
-                                <?php endif; ?>
-
-                            </div>
-
-                        </div>
-
-
-                    </div>
-
-
-                    <div class="actions">
-
-
-                        <?php if (
-                            $payableReservation
-                            &&
-                            (
-                                !$paymentStatus
-                                ||
-                                in_array($paymentStatus, ["rejected", "cancelled"], true)
-                            )
-                        ): ?>
-
-
-                            <a
-                                href="../payment.php?reservation_id=<?= (int)
-                                    $reservation["id"]
-                                ?>"
-                                class="btn btn-primary"
-                            >
-
-                                <?= $paymentStatus === "rejected"
-                                    ? "Pay Again"
-                                    : "Pay Now"
-                                ?>
-
-                            </a>
-
-                        <?php endif; ?>
-
-
-                        <?php if ($canCancel): ?>
-
-
-                            <form
-                                method="POST"
-                                onsubmit="
-                                    return confirm(
-                                        'Are you sure you want to cancel this reservation?'
-                                    );
-                                "
-                            >
-
-                                <input
-                                    type="hidden"
-                                    name="reservation_id"
-                                    value="<?= (int)
-                                        $reservation["id"]
-                                    ?>"
-                                >
-
-
-                                <button
-                                    type="submit"
-                                    name="cancel_reservation"
-                                    class="btn btn-danger"
-                                >
-                                    Cancel Reservation
-                                </button>
-
-                            </form>
-
-
-                        <?php endif; ?>
-
-
-                    </div>
-
-
-                </div>
-
-
-            </article>
-
-
-        <?php endforeach; ?>
-
-
-    <?php else: ?>
-
-
-        <div class="empty">
-
-            <h3>
-                No reservations yet
-            </h3>
-
-            <p>
-                You haven't booked a room yet.
-                Browse available rooms and start your first reservation.
-            </p>
-
-            <a
-                href="../rooms.php"
-                class="btn btn-primary"
-            >
-                View Available Rooms
+    <!-- WAITING FOR THE GUEST (phones: quick actions) -->
+
+    <h2 class="todo-title">Quick Actions</h2>
+
+    <section class="todo" aria-label="Waiting for you">
+        <?php foreach ($todo as $index => [$count, $label, $short, $iconName, $tone, $href]): ?>
+            <a class="todo-item<?= $count === 0 ? " is-clear" : "" ?><?= $index === $featured ? " is-featured" : "" ?>" href="<?= h($href) ?>">
+                <span class="tile-icon tone-<?= $count === 0 && $index !== $featured ? "gray" : $tone ?>"><?= icon($iconName) ?></span>
+                <span class="todo-text">
+                    <span class="todo-count"><?= number_format($count) ?></span>
+                    <span class="todo-label"><span class="todo-long"><?= h($label) ?></span><span class="todo-short"><?= h($short) ?></span></span>
+                </span>
+                <?= icon("chevron-right", 16) ?>
             </a>
+        <?php endforeach; ?>
+    </section>
 
-        </div>
 
+    <!-- THE NEXT STAY -->
 
+    <?php if ($nextStay): ?>
+        <?php
+        $id = (int) $nextStay["id"];
+        $photo = customer_room_photo((int) $nextStay["room_id"]);
+        $when = customer_countdown($nextStay["check_in"], $nextStay["check_out"]);
+        $nightsHere = (int) $nextStay["total_nights"];
+        ?>
+        <section class="card next-stay" aria-labelledby="next-stay-title">
+            <div class="next-stay-photo">
+                <?php if ($photo !== ""): ?>
+                    <img src="<?= h($photo) ?>" alt="<?= h($nextStay["room_name"]) ?>" decoding="async">
+                <?php else: ?>
+                    <?= room_scene("dusk", "next") ?>
+                <?php endif; ?>
+
+                <?php if ($when !== ""): ?>
+                    <span class="next-stay-when"><?= h($when) ?></span>
+                <?php endif; ?>
+            </div>
+
+            <div class="next-stay-body">
+                <span class="eyebrow">Your next stay · #<?= $id ?></span>
+                <h2 id="next-stay-title"><?= h($nextStay["room_name"]) ?></h2>
+
+                <div class="next-stay-pills">
+                    <?= status_pill($nextStay["status"]) ?>
+                    <?= customer_payment_pill($nextStay["payment_status"]) ?>
+                </div>
+
+                <div class="next-stay-facts">
+                    <div><span>Check-in</span><strong><?= h(admin_date($nextStay["check_in"], "D, M j")) ?></strong></div>
+                    <div><span>Check-out</span><strong><?= h(admin_date($nextStay["check_out"], "D, M j")) ?></strong></div>
+                    <div><span>Guests</span><strong><?= (int) $nextStay["guests"] ?></strong></div>
+                </div>
+
+                <p class="soft" style="margin:0">
+                    <?= $nightsHere ?> <?= $nightsHere === 1 ? "night" : "nights" ?> · <?= h(peso($nextStay["total_amount"], 2)) ?> in total
+                </p>
+
+                <div class="next-stay-actions">
+                    <?php if (customer_can_pay($nextStay)): ?>
+                        <a class="btn btn-primary" href="../payment.php?reservation_id=<?= $id ?>"><?= icon("credit-card") ?> <?= $nextStay["payment_status"] === "rejected" ? "Pay again" : "Pay now" ?></a>
+                    <?php elseif ($nextStay["payment_status"] === "pending"): ?>
+                        <span class="wait-note"><?= icon("clock", 14) ?> We are checking your payment</span>
+                    <?php endif; ?>
+                    <a class="btn" href="reservations.php?open=<?= $id ?>">View details</a>
+                </div>
+            </div>
+        </section>
+    <?php elseif (!$reservations): ?>
+        <section class="card first-stay">
+            <div>
+                <span class="eyebrow">Welcome to ARVE'S House</span>
+                <h2>Plan your first stay</h2>
+                <p>Choose your dates, pick a room and book it in a few minutes. Your bookings and payments will show up here.</p>
+            </div>
+            <a class="btn btn-primary" href="../rooms.php"><?= icon("bed") ?> See the rooms</a>
+        </section>
     <?php endif; ?>
 
 
-</div>
+    <!-- PHONES: THE LATEST BOOKINGS AS A LIST -->
+
+    <?php if ($reservations): ?>
+        <section class="recent show-sm" aria-label="My reservations">
+            <div class="recent-head">
+                <h2>My Reservations</h2>
+                <a href="reservations.php">View All</a>
+            </div>
+
+            <ul class="recent-list">
+                <?php foreach (array_slice($reservations, 0, 5) as $reservation): ?>
+                    <?php $photo = customer_room_photo((int) $reservation["room_id"]); ?>
+                    <li>
+                        <a class="recent-item" href="reservations.php?open=<?= (int) $reservation["id"] ?>">
+                            <?php if ($photo !== ""): ?>
+                                <img class="recent-thumb" src="<?= h($photo) ?>" alt="" loading="lazy" decoding="async">
+                            <?php else: ?>
+                                <span class="tile-icon tone-blue"><?= icon("bed") ?></span>
+                            <?php endif; ?>
+                            <span class="recent-text">
+                                <span class="recent-name"><?= h($reservation["room_name"]) ?></span>
+                                <span class="recent-sub">
+                                    <?= status_pill($reservation["status"]) ?>
+                                    <span><?= h(admin_stay($reservation["check_in"], $reservation["check_out"])) ?></span>
+                                </span>
+                            </span>
+                            <span class="recent-end">
+                                <span class="recent-amount"><?= h(peso($reservation["total_amount"])) ?></span>
+                                <span class="recent-note">#<?= (int) $reservation["id"] ?></span>
+                            </span>
+                        </a>
+                    </li>
+                <?php endforeach; ?>
+            </ul>
+        </section>
+    <?php endif; ?>
 
 
-<footer>
+    <div class="grid grid-main">
 
-    <div class="footer-inner">
+        <!-- LEFT: the latest bookings -->
 
-        <div>
+        <div class="col">
+            <section class="card hide-sm">
+                <div class="card-head">
+                    <h2 class="card-title">My Reservations</h2>
+                    <?php if ($reservations): ?>
+                        <a class="card-link" href="reservations.php">View all</a>
+                    <?php endif; ?>
+                </div>
 
-            <h3>
-                ARVE'S House
-            </h3>
+                <?php if ($reservations): ?>
+                    <div class="table-wrap">
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>Room</th>
+                                    <th>Stay</th>
+                                    <th class="right">Amount</th>
+                                    <th>Payment</th>
+                                    <th>Status</th>
+                                    <th class="right">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach (array_slice($reservations, 0, 5) as $reservation): ?>
+                                    <?php $id = (int) $reservation["id"]; ?>
+                                    <tr>
+                                        <td class="cell-clip">
+                                            <strong><?= h($reservation["room_name"]) ?></strong>
+                                            <span class="cell-sub">#<?= $id ?></span>
+                                        </td>
+                                        <td class="nowrap">
+                                            <?= h(admin_stay($reservation["check_in"], $reservation["check_out"])) ?>
+                                            <span class="cell-sub"><?= (int) $reservation["total_nights"] ?> <?= (int) $reservation["total_nights"] === 1 ? "night" : "nights" ?></span>
+                                        </td>
+                                        <td class="right num strong"><?= h(peso($reservation["total_amount"])) ?></td>
+                                        <td><?= customer_payment_pill($reservation["payment_status"]) ?></td>
+                                        <td><?= status_pill($reservation["status"]) ?></td>
+                                        <td class="right">
+                                            <?php if (customer_can_pay($reservation)): ?>
+                                                <a class="btn btn-sm btn-primary" href="../payment.php?reservation_id=<?= $id ?>"><?= $reservation["payment_status"] === "rejected" ? "Pay again" : "Pay now" ?></a>
+                                            <?php else: ?>
+                                                <a class="btn btn-sm btn-ghost" href="reservations.php?open=<?= $id ?>">Details</a>
+                                            <?php endif; ?>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
 
-            <p>
-                Your Home Away From Home
-            </p>
-
+                    <div class="card-foot">
+                        <a class="card-link" href="reservations.php">View all reservations <?= icon("chevron-right", 14) ?></a>
+                    </div>
+                <?php else: ?>
+                    <div class="empty">
+                        <div class="empty-icon"><?= icon("calendar", 22) ?></div>
+                        <h3>No reservations yet</h3>
+                        <p>Browse the rooms and book your first stay.</p>
+                        <a class="btn btn-primary" href="../rooms.php">View available rooms</a>
+                    </div>
+                <?php endif; ?>
+            </section>
         </div>
 
 
-        <div>
+        <!-- RIGHT: what happened, and help -->
 
-            <p>
-                Customer Reservation Portal
-            </p>
+        <div class="col">
+            <section class="card">
+                <div class="card-head">
+                    <h2 class="card-title">Recent Activity</h2>
+                    <a class="card-link" href="notifications.php">Updates</a>
+                </div>
+                <?= customer_feed($history, $userId, ["new_since" => $me["notifications_seen_at"], "empty" => "Your bookings and payments will show up here"]) ?>
+            </section>
 
-            <p>
-                Comfort · Relax · Stay
-            </p>
-
+            <section class="card card-pad help-card">
+                <h2 class="card-title">Need help?</h2>
+                <p>Questions about a room, your booking or a payment? Send us a message and we will reply here.</p>
+                <div class="row row-wrap">
+                    <a class="btn btn-primary" href="messages.php"><?= icon("message") ?> Message us</a>
+                    <button class="btn btn-ghost" type="button" data-terms-open><?= icon("file-text") ?> House rules</button>
+                </div>
+            </section>
         </div>
 
     </div>
 
-</footer>
+</div>
 
-
-<?php require __DIR__ . "/../includes/inbox-widget.php"; ?>
-<?php require __DIR__ . "/../includes/terms-modal.php"; ?>
-
-</body>
-
-</html>
+<?php customer_shell_end(); ?>

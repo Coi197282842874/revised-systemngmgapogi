@@ -1,6 +1,8 @@
 /*
- * ARVE'S House admin panel: theme, menus, search, notifications, charts, dialogs.
- * Loaded at the end of every admin page by includes/admin-shell.php. No libraries.
+ * ARVE'S House admin panel and customer area: theme, menus, search, notifications, charts, dialogs.
+ * Loaded at the end of every page by includes/admin-shell.php and includes/customer-shell.php.
+ * Addresses are relative (search.php, notifications.php): each area answers them in its own folder.
+ * No libraries.
  *
  * What pages can use (all optional, all plain HTML attributes):
  *   <form data-confirm="Delete this room?" data-confirm-ok="Delete" data-confirm-tone="danger">
@@ -75,14 +77,20 @@
     // LIGHT AND DARK
     // ======================================================
 
-    const THEME_COLORS = { dark: "#060912", light: "#f3f5fa" };
+    // The customer area uses this file too: <html data-theme-cookie> names its own cookie, and
+    // <meta name="theme-color" data-light data-dark> gives its own colors for the browser bar.
+    const themeColor = $('meta[name="theme-color"]');
+    const THEME_COOKIE = root.dataset.themeCookie || "arves_admin_theme";
+    const THEME_COLORS = {
+        dark: (themeColor && themeColor.dataset.dark) || "#060912",
+        light: (themeColor && themeColor.dataset.light) || "#f3f5fa",
+    };
 
     function setTheme(theme) {
         root.dataset.theme = theme;
-        doc.cookie = "arves_admin_theme=" + theme + "; path=/; max-age=31536000; samesite=lax";
+        doc.cookie = THEME_COOKIE + "=" + theme + "; path=/; max-age=31536000; samesite=lax";
 
-        const color = $('meta[name="theme-color"]');
-        if (color) color.content = THEME_COLORS[theme];
+        if (themeColor) themeColor.content = THEME_COLORS[theme];
     }
 
     $$("[data-theme-toggle]").forEach((button) => {

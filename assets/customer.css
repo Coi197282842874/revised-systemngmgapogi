@@ -1,0 +1,768 @@
+/*
+ * ARVE'S House customer area: the admin panel's frame and parts (assets/admin.css) in the
+ * website's own colors. Loaded after admin.css by includes/customer-shell.php, on pages whose
+ * <html> has data-area="customer".
+ *
+ * Light (the default) is the website's cream and brown; dark is the homepage's night brown with
+ * gold. Only the tokens change, plus the few parts that only guests have.
+ *
+ * Contents
+ *    1 Tokens (light, dark)      5 Rounded rows (phones)
+ *    2 The frame                 6 Messages
+ *    3 Updates in the top bar    7 Profile
+ *    4 Dashboard: the next stay  8 Less motion
+ */
+
+
+/* ======================================================
+   1 TOKENS
+====================================================== */
+
+:root[data-area="customer"] {
+    --serif: Georgia, "Times New Roman", serif;
+}
+
+:root[data-area="customer"],
+:root[data-area="customer"][data-theme="light"] {
+    color-scheme: light;
+
+    --bg: #f8efe4;
+    --bg-2: #fffaf4;
+    --surface: #fffdf9;
+    --surface-2: #faf3ea;
+    --surface-3: #f1e5d7;
+    --line: #ecdfd0;
+    --line-2: #dfcdb9;
+
+    --text: #241a15;
+    --text-2: #5b4d44;
+    --text-3: #75675e;
+
+    --accent: #7a4f36;
+    --accent-hover: #6b442e;
+    --accent-press: #5a3826;
+    --accent-text: #7a4f36;
+    --accent-soft: #f4e7d9;
+    --on-accent: #ffffff;
+    --ring: rgba(122, 79, 54, 0.45);
+
+    --success: #2f6b3a;
+    --success-soft: #e4f1e4;
+    --warning: #8f5409;
+    --warning-soft: #fbecd0;
+    --danger: #a3322a;
+    --danger-soft: #fbe2de;
+    --danger-fill: #b3382e;
+    --info: #2f5f7a;
+    --info-soft: #e1edf2;
+    --neutral: #5b4d44;
+    --neutral-soft: #f1e5d7;
+
+    --tone-blue: #7a4f36;
+    --tone-green: #3d7a47;
+    --tone-violet: #8b5a7d;
+    --tone-cyan: #2f7480;
+    --tone-amber: #a86d12;
+    --tone-rose: #b04a3a;
+    --tone-alpha: 0.12;
+    --tone-glow: 0;
+
+    --series-1: #7a4f36;
+    --series-2: #c98f3f;
+    --series-3: #3d7a47;
+    --chart-grid: #efe3d5;
+    --chart-axis: #dccab6;
+
+    --bar-bg: #2d1d16;
+    --bar-item: rgba(255, 255, 255, 0.1);
+    --bar-ink: #f4e7d9;
+    --bar-line: transparent;
+
+    --shadow-card: 0 1px 2px rgba(76, 50, 34, 0.05), 0 10px 26px rgba(76, 50, 34, 0.07);
+    --shadow-pop: 0 0 0 1px rgba(76, 50, 34, 0.08), 0 18px 48px rgba(76, 50, 34, 0.2);
+    --scrim: rgba(36, 26, 21, 0.45);
+
+    --brand-mark: linear-gradient(145deg, #8a5e42, #5a3826);
+    --brand-glow: rgba(90, 56, 38, 0.3);
+}
+
+:root[data-area="customer"][data-theme="dark"] {
+    color-scheme: dark;
+
+    --bg: #140d0a;
+    --bg-2: #1a120d;
+    --surface: #211710;
+    --surface-2: #2a1e16;
+    --surface-3: #35261c;
+    --line: rgba(255, 236, 214, 0.08);
+    --line-2: rgba(255, 236, 214, 0.15);
+
+    --text: #f7eee4;
+    --text-2: #cdbcaa;
+    --text-3: #a89685;
+
+    --accent: #d4a76a;
+    --accent-hover: #ddb47d;
+    --accent-press: #c39455;
+    --accent-text: #e0bb85;
+    --accent-soft: rgba(212, 167, 106, 0.16);
+    --on-accent: #2a1b12;
+    --ring: rgba(212, 167, 106, 0.55);
+
+    --success: #84d08f;
+    --success-soft: rgba(132, 208, 143, 0.14);
+    --warning: #f0bf63;
+    --warning-soft: rgba(240, 191, 99, 0.15);
+    --danger: #f28b7c;
+    --danger-soft: rgba(242, 139, 124, 0.15);
+    --danger-fill: #c2412f;
+    --info: #9cc6da;
+    --info-soft: rgba(156, 198, 218, 0.14);
+    --neutral: #cdbcaa;
+    --neutral-soft: rgba(205, 188, 170, 0.12);
+
+    --tone-blue: #d4a76a;
+    --tone-green: #84d08f;
+    --tone-violet: #d3a4c6;
+    --tone-cyan: #7fc8d1;
+    --tone-amber: #f0bf63;
+    --tone-rose: #f28b7c;
+    --tone-alpha: 0.14;
+    --tone-glow: 0.2;
+
+    --series-1: #d4a76a;
+    --series-2: #e07b54;
+    --series-3: #7fc8a0;
+    --chart-grid: rgba(255, 236, 214, 0.07);
+    --chart-axis: rgba(255, 236, 214, 0.16);
+
+    --bar-bg: #35261c;
+    --bar-item: rgba(255, 255, 255, 0.07);
+    --bar-ink: #f4e7d9;
+    --bar-line: rgba(255, 236, 214, 0.12);
+
+    --shadow-card: 0 1px 0 rgba(255, 236, 214, 0.03) inset, 0 10px 30px rgba(0, 0, 0, 0.3);
+    --shadow-pop: 0 0 0 1px rgba(255, 236, 214, 0.07), 0 18px 50px rgba(0, 0, 0, 0.6);
+    --scrim: rgba(8, 5, 3, 0.66);
+
+    --brand-mark: linear-gradient(145deg, #d9b27a, #a87a45);
+    --brand-glow: rgba(212, 167, 106, 0.25);
+}
+
+
+/* ======================================================
+   2 THE FRAME
+====================================================== */
+
+/* page titles in the website's serif */
+[data-area="customer"] .topbar-title h1,
+[data-area="customer"] .page-title-mobile h1 {
+    font-family: var(--serif);
+    letter-spacing: 0;
+}
+
+[data-area="customer"] .brand-mark {
+    background: var(--brand-mark);
+    color: var(--on-accent);
+    box-shadow: 0 6px 16px var(--brand-glow), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+[data-area="customer"][data-theme="light"] .brand-mark {
+    color: #fff;
+}
+
+[data-area="customer"] .brand-name {
+    font-family: var(--serif);
+}
+
+[data-area="customer"] .nav-item.is-active {
+    box-shadow: 0 8px 20px var(--brand-glow);
+}
+
+[data-area="customer"] .nav-item.is-active .nav-badge,
+[data-area="customer"] .tab.is-active .tab-count {
+    background: color-mix(in srgb, var(--on-accent) 22%, transparent);
+    color: var(--on-accent);
+}
+
+/* people's initials in warm colors */
+[data-area="customer"] .avatar-tone-1 { background: #7a4f36; }
+[data-area="customer"] .avatar-tone-2 { background: #8b5a7d; }
+[data-area="customer"] .avatar-tone-3 { background: #3d7a47; }
+[data-area="customer"] .avatar-tone-4 { background: #b04a3a; }
+[data-area="customer"] .avatar-tone-5 { background: #a86d12; }
+[data-area="customer"] .avatar-tone-6 { background: #2f7480; }
+
+/* the terms open from the account menu here: their round button would sit on the bottom bar */
+[data-area="customer"] .tm-fab {
+    display: none !important;
+}
+
+/* "Being checked": a quiet line where a button would be */
+.wait-note {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-3);
+    font-size: 12.5px;
+    white-space: nowrap;
+}
+
+@media (max-width: 767px) {
+    .wait-note {
+        white-space: normal;
+    }
+}
+
+.eyebrow {
+    color: var(--accent-text);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+}
+
+
+/* ======================================================
+   3 UPDATES IN THE TOP BAR
+====================================================== */
+
+/* above the list: new messages from ARVE'S House */
+.notif-message {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 0 8px 4px;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    background: var(--accent-soft);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.35;
+    text-decoration: none;
+}
+
+.notif-message strong {
+    display: block;
+}
+
+.notif-message .feed-icon {
+    flex: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .notif-message:hover {
+        background: color-mix(in srgb, var(--accent-soft) 70%, var(--accent) 12%);
+    }
+}
+
+
+/* ======================================================
+   4 DASHBOARD: THE NEXT STAY
+====================================================== */
+
+.next-stay {
+    display: grid;
+    grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+    overflow: hidden;
+}
+
+.next-stay-photo {
+    position: relative;
+    min-height: 240px;
+    background: var(--brand-mark);
+    color: rgba(255, 255, 255, 0.85);
+}
+
+.next-stay-photo img,
+.next-stay-photo .scene {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.next-stay-when {
+    position: absolute;
+    top: 14px;
+    left: 14px;
+    padding: 5px 11px;
+    border-radius: 999px;
+    background: rgba(20, 13, 10, 0.62);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+}
+
+.next-stay-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
+    padding: 24px;
+}
+
+.next-stay-body h2 {
+    margin: 0;
+    font-family: var(--serif);
+    font-size: 26px;
+    line-height: 1.15;
+    overflow-wrap: anywhere;
+}
+
+.next-stay-facts {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.next-stay-facts div {
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+}
+
+.next-stay-facts span {
+    display: block;
+    color: var(--text-3);
+    font-size: 11.5px;
+    font-weight: 600;
+}
+
+.next-stay-facts strong {
+    display: block;
+    margin-top: 2px;
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
+}
+
+.next-stay-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.next-stay-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: auto;
+}
+
+/* nothing booked yet: an invitation instead */
+.first-stay {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    padding: 26px;
+    background: var(--surface);
+    background:
+        radial-gradient(28rem 16rem at 100% 0%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 70%),
+        var(--surface);
+}
+
+.first-stay h2 {
+    margin: 4px 0 6px;
+    font-family: var(--serif);
+    font-size: 26px;
+}
+
+.first-stay p {
+    max-width: 520px;
+    margin: 0;
+    color: var(--text-2);
+}
+
+@media (max-width: 767px) {
+    .next-stay {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .next-stay-photo {
+        min-height: 0;
+        aspect-ratio: 16 / 10;
+    }
+
+    .next-stay-body {
+        padding: 18px;
+    }
+
+    .next-stay-body h2 {
+        font-size: 22px;
+    }
+
+    .next-stay-facts {
+        gap: 8px;
+    }
+
+    .next-stay-actions .btn {
+        flex: 1 1 auto;
+    }
+
+    .first-stay {
+        flex-direction: column;
+        align-items: stretch;
+        padding: 20px;
+    }
+}
+
+
+/* ======================================================
+   5 ROUNDED ROWS (phones): bookings as a list instead of a table
+====================================================== */
+
+.recent-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.recent-head h2 {
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+
+.recent-head a {
+    font-size: 12.5px;
+    font-weight: 600;
+}
+
+.recent-list {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.recent-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 68px;
+    padding: 10px 16px 10px 10px;
+    border: 1px solid var(--line);
+    border-radius: 22px;
+    background: var(--surface);
+    color: var(--text);
+    transition: background-color 120ms ease, transform 140ms var(--ease-out);
+}
+
+.recent-item:hover {
+    text-decoration: none;
+}
+
+.recent-item:active {
+    background: var(--surface-2);
+    transform: scale(0.985);
+}
+
+.recent-thumb {
+    flex: none;
+    width: 46px;
+    height: 46px;
+    border-radius: 14px;
+    object-fit: cover;
+}
+
+.recent-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.recent-name {
+    display: block;
+    overflow: hidden;
+    font-size: 14px;
+    font-weight: 600;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.recent-sub {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 3px;
+    overflow: hidden;
+    color: var(--text-3);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.recent-sub .pill {
+    flex: none;
+    height: 20px;
+    padding: 0 8px;
+    font-size: 11px;
+}
+
+.recent-end {
+    flex: none;
+    text-align: right;
+}
+
+.recent-amount {
+    display: block;
+    font-size: 15px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+.recent-note {
+    display: block;
+    overflow: hidden;
+    max-width: 96px;
+    color: var(--text-3);
+    font-size: 11.5px;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+
+/* ======================================================
+   6 MESSAGES
+====================================================== */
+
+.chat {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.chat-thread {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 280px;
+    max-height: calc(100dvh - 330px);
+    padding: 18px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.chat .msg {
+    max-width: 78%;
+    padding: 9px 13px;
+    border-radius: 16px;
+    font-size: 14px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.chat .msg small {
+    display: block;
+    margin-top: 3px;
+    font-size: 11px;
+    opacity: 0.75;
+}
+
+.chat .msg-who {
+    display: block;
+    margin-bottom: 2px;
+    color: var(--accent-text);
+    font-size: 11.5px;
+    font-weight: 800;
+}
+
+.chat .msg.me {
+    align-self: flex-end;
+    border-bottom-right-radius: 5px;
+    background: var(--accent);
+    color: var(--on-accent);
+}
+
+.chat .msg.them {
+    align-self: flex-start;
+    border-bottom-left-radius: 5px;
+    background: var(--surface-3);
+}
+
+.chat-note {
+    flex: none;
+    margin: 0 16px 10px;
+}
+
+.compose {
+    display: flex;
+    align-items: flex-end;
+    gap: 10px;
+    flex: none;
+    padding: 12px 14px 14px;
+    border-top: 1px solid var(--line);
+}
+
+.compose .textarea {
+    flex: 1;
+    min-height: 46px;
+    max-height: 160px;
+}
+
+.compose .btn {
+    flex: none;
+    min-height: 46px;
+}
+
+@media (max-width: 767px) {
+    .chat-thread {
+        max-height: calc(100dvh - 300px);
+        padding: 14px 12px;
+    }
+
+    .chat .msg {
+        max-width: 86%;
+    }
+}
+
+
+/* ======================================================
+   7 PROFILE
+====================================================== */
+
+.profile-hero {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 28px 22px 24px;
+    text-align: center;
+}
+
+.profile-photo {
+    position: relative;
+    margin-bottom: 8px;
+}
+
+.profile-photo .avatar {
+    box-shadow: 0 0 0 4px var(--surface), 0 0 0 5px var(--line-2);
+}
+
+.profile-photo-btn {
+    position: absolute;
+    right: -2px;
+    bottom: -2px;
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    border: 3px solid var(--surface);
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--on-accent);
+    cursor: pointer;
+    font-size: 16px;
+    transition: transform 140ms var(--ease-out);
+}
+
+.profile-photo-btn:active {
+    transform: scale(0.94);
+}
+
+.profile-hero h2 {
+    margin: 0;
+    font-family: var(--serif);
+    font-size: 24px;
+    overflow-wrap: anywhere;
+}
+
+.profile-hero p {
+    margin: 0;
+    color: var(--text-3);
+    overflow-wrap: anywhere;
+}
+
+.profile-facts {
+    width: 100%;
+    margin: 14px 0 0;
+    padding: 0;
+    border-top: 1px solid var(--line);
+    list-style: none;
+    text-align: left;
+}
+
+.profile-facts li {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 11px 2px;
+    border-bottom: 1px solid var(--line);
+    font-size: 13px;
+}
+
+.profile-facts li span {
+    color: var(--text-3);
+}
+
+.profile-facts li strong {
+    min-width: 0;
+    text-align: right;
+    overflow-wrap: anywhere;
+}
+
+/* the picture in the "Change photo" window */
+.photo-preview {
+    display: grid;
+    place-items: center;
+    width: 132px;
+    height: 132px;
+    margin: 4px auto 14px;
+    overflow: hidden;
+    border-radius: 50%;
+    background: var(--surface-3);
+    color: var(--text-3);
+    font-size: 48px;
+}
+
+.photo-preview img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.photo-hint {
+    margin: 0 0 12px;
+    color: var(--text-3);
+    font-size: 13px;
+    text-align: center;
+}
+
+.photo-hint.is-error {
+    color: var(--danger);
+}
+
+.photo-file {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+}
+
+
+/* ======================================================
+   8 LESS MOTION
+====================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+    .recent-item {
+        transform: none !important;
+    }
+
+    .profile-photo-btn {
+        transition: none;
+    }
+
+    .profile-photo-btn:active {
+        transform: none;
+    }
+}
