@@ -1,0 +1,22 @@
+# Secrets. Copy the *.sample.php files next to them and fill those in.
+/config/auth.php
+/config/database.credentials.php
+
+# One-time scripts that must never go online
+/create_admin.php
+/admin-setup-*.php
+
+# Customer uploads (profile photos, room photos)
+/uploads/*
+!/uploads/.htaccess
+
+# Archives, dumps and logs
+*.zip
+*.tar
+*.sql.gz
+*.log
+*.bak
+
+# Editor and assistant tools
+/.qodo/
+/.claude/settings.local.json

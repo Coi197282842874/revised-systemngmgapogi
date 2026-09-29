@@ -1,0 +1,4 @@
+# Only images may be served from uploads
+<FilesMatch "\.(?i:php|phtml|phar|php\d)$">
+    Require all denied
+</FilesMatch>

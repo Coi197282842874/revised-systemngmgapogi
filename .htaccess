@@ -1,0 +1,8 @@
+# ARVE'S House
+Options -Indexes
+DirectoryIndex index.php
+
+# Never serve backups, dumps or dotfiles
+<FilesMatch "(\.(sql|zip|log|bak|md)|^\..*)$">
+    Require all denied
+</FilesMatch>
