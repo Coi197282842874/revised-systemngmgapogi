@@ -20,3 +20,6 @@
 # Editor and assistant tools
 /.qodo/
 /.claude/settings.local.json
+
+# Tailwind CSS program (large); see build-css.bat
+/tools/

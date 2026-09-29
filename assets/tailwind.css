@@ -1,0 +1,433 @@
+/*
+ * ARVE'S House public pages: the Tailwind CSS (v4) source.
+ *
+ * This file is NOT sent to browsers. It is built into assets/site.css by
+ * tools/tailwindcss.exe: run build-css.bat after changing classes in a page listed under
+ * @source, or after changing this file. Upload assets/site.css, not this file.
+ *
+ * Tailwind's reset ("preflight") is left out on purpose: the login, messages and terms
+ * windows are shared with pages that don't use Tailwind and bring their own styles.
+ */
+
+@layer theme, base, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+
+/* the pages whose classes are collected */
+@source "../index.php";
+
+@theme {
+    --font-sans: Arial, Helvetica, sans-serif;
+    --font-display: Georgia, "Times New Roman", serif;
+
+    --color-cream: #fffaf4;
+    --color-sand: #f4e7d9;
+    --color-brown-400: #b37a50;
+    --color-brown-500: #7a4f36;
+    --color-brown-700: #5a3826;
+    --color-brown-900: #2d1d16;
+    --color-night: #1a110d;
+    --color-gold: #d4a76a;
+    --color-ink: #241a15;
+    --color-muted: #786d66;
+
+    /* the site's motion curves (the same ones the other pages use) */
+    --ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1);
+    --ease-in-out-strong: cubic-bezier(0.77, 0, 0.175, 1);
+    --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+
+/* ======================================================
+   BASE: the small reset the site's pages have always had
+====================================================== */
+
+@layer base {
+    * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+    }
+
+    html {
+        scroll-behavior: smooth;
+        -webkit-tap-highlight-color: transparent;
+        -webkit-text-size-adjust: 100%;
+        text-size-adjust: 100%;
+    }
+
+    body {
+        min-height: 100vh;
+        min-height: 100svh;
+        font-family: var(--font-sans);
+        line-height: 1.6;
+        color: var(--color-ink);
+        background: linear-gradient(135deg, #fffdf9 0%, #f8f0e6 48%, #eee0d1 100%);
+    }
+
+    a {
+        color: inherit;
+        text-decoration: none;
+    }
+
+    button,
+    input {
+        font: inherit;
+    }
+
+    img {
+        max-width: 100%;
+        height: auto;
+    }
+
+    /* controls answer at once and their labels can't be selected by a long press */
+    button,
+    a,
+    input {
+        touch-action: manipulation;
+    }
+
+    button,
+    .nav-links a {
+        -webkit-user-select: none;
+        user-select: none;
+    }
+
+    body.menu-open {
+        overflow: hidden;
+    }
+
+    :focus-visible {
+        outline: 2px solid var(--color-gold);
+        outline-offset: 3px;
+    }
+}
+
+
+/* ======================================================
+   COMPONENTS: what utility classes alone can't say
+====================================================== */
+
+@layer components {
+
+    /* ---- the large pictures of the hero and the way one replaces the other ---- */
+
+    .slide {
+        position: absolute;
+        inset: 0;
+        overflow: hidden;
+        visibility: hidden;
+    }
+
+    .slide > img,
+    .slide > .scene {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        max-width: none;
+        object-fit: cover;
+    }
+
+    .slide.is-current {
+        z-index: 1;
+        visibility: visible;
+    }
+
+    /* the picture that is showing drifts very slowly towards the viewer */
+    .slide.is-current > * {
+        animation: slide-drift 9s linear both;
+    }
+
+    /*
+     * The next picture is uncovered like a curtain drawn aside: from the right when the
+     * pictures go forward, from the left when they go back.
+     */
+    .slide.is-entering {
+        z-index: 2;
+        visibility: visible;
+        clip-path: inset(0 0 0 100%);
+    }
+
+    .slide.is-entering > * {
+        transform: scale(1.1) translateX(3%);
+    }
+
+    .slide.is-entering.is-back {
+        clip-path: inset(0 100% 0 0);
+    }
+
+    .slide.is-entering.is-back > * {
+        transform: scale(1.1) translateX(-3%);
+    }
+
+    .slide.is-entering.is-in {
+        clip-path: inset(0 0 0 0);
+        transition: clip-path 1200ms var(--ease-in-out-strong);
+    }
+
+    .slide.is-entering.is-in > * {
+        transform: none;
+        transition: transform 1700ms var(--ease-out-strong);
+    }
+
+    @keyframes slide-drift {
+        from { transform: scale(1); }
+        to { transform: scale(1.06); }
+    }
+
+    /* the bar of the picture that is showing fills while it shows */
+    .slide-dot::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        background: #fff;
+        transform: scaleX(0);
+        transform-origin: left center;
+    }
+
+    .slide-dot[aria-current="true"]::after {
+        animation: dot-fill var(--slide-time, 7000ms) linear both;
+    }
+
+    [data-paused] .slide-dot[aria-current="true"]::after {
+        animation: none;
+        transform: none;
+    }
+
+    @keyframes dot-fill {
+        to { transform: scaleX(1); }
+    }
+
+    /* ---- the first seconds: the headline rises line by line ---- */
+
+    .line {
+        display: block;
+        overflow: hidden;
+        padding-bottom: 0.1em;
+    }
+
+    .line-in {
+        display: block;
+        animation: line-rise 900ms var(--ease-out-strong) both;
+        animation-delay: calc(var(--i, 0) * 90ms + 150ms);
+    }
+
+    .fade-up {
+        animation: fade-up 800ms var(--ease-out-strong) both;
+        animation-delay: calc(var(--i, 0) * 90ms + 150ms);
+    }
+
+    @keyframes line-rise {
+        from { transform: translateY(105%); }
+    }
+
+    @keyframes fade-up {
+        from {
+            opacity: 0;
+            transform: translateY(16px);
+        }
+    }
+
+    /* the words stay readable on a bright photo */
+    .hero-copy {
+        text-shadow: 0 1px 2px rgb(0 0 0 / 0.35), 0 6px 34px rgb(0 0 0 / 0.5);
+    }
+
+    .hero-copy [role="alert"],
+    .hero-copy a {
+        text-shadow: none;
+    }
+
+    /* ---- while the page scrolls: the words leave, the picture sinks and dims ---- */
+
+    .hero-dim {
+        opacity: 0;
+    }
+
+    @supports (animation-timeline: scroll()) {
+        @media (prefers-reduced-motion: no-preference) {
+            .hero-copy {
+                animation: hero-leave linear both;
+                animation-timeline: scroll(root block);
+                animation-range: 0px 80vh;
+            }
+
+            .slides {
+                animation: slides-sink linear both;
+                animation-timeline: scroll(root block);
+                animation-range: 0px 100vh;
+            }
+
+            .hero-dim {
+                animation: hero-dim linear both;
+                animation-timeline: scroll(root block);
+                animation-range: 0px 90vh;
+            }
+        }
+    }
+
+    @keyframes hero-leave {
+        to {
+            opacity: 0;
+            transform: translateY(-70px);
+        }
+    }
+
+    @keyframes slides-sink {
+        to { transform: translateY(12%) scale(1.05); }
+    }
+
+    @keyframes hero-dim {
+        to { opacity: 0.75; }
+    }
+
+    /* ---- things that appear once, when they scroll into view ---- */
+
+    .reveal {
+        opacity: 0;
+        transform: translateY(28px);
+        transition: opacity 700ms var(--ease-out-strong), transform 900ms var(--ease-out-strong);
+        transition-delay: calc(var(--i, 0) * 80ms);
+    }
+
+    .reveal.is-visible {
+        opacity: 1;
+        transform: none;
+    }
+
+    /*
+     * Photo cards are uncovered from the bottom up, and their photo settles. The frame inside
+     * the card is what gets uncovered: the card itself is watched by the script, and browsers
+     * count an element that is clipped away completely as "not in view", for ever.
+     */
+    .reveal-photo > .photo-frame {
+        clip-path: inset(100% 0 0 0 round 22px);
+        transition: clip-path 1000ms var(--ease-in-out-strong);
+        transition-delay: calc(var(--i, 0) * 110ms);
+    }
+
+    .reveal-photo .card-photo {
+        transform: scale(1.18);
+        transition: transform 1500ms var(--ease-out-strong);
+        transition-delay: calc(var(--i, 0) * 110ms);
+    }
+
+    .reveal-photo.is-visible > .photo-frame {
+        clip-path: inset(0 0 0 0 round 22px);
+    }
+
+    /* a drawn scene in a card fills it the way a photo does */
+    .card-photo > .scene {
+        display: block;
+        width: 100%;
+        height: 100%;
+    }
+
+    .reveal-photo.is-visible .card-photo {
+        transform: none;
+    }
+
+    /* without the script nothing waits to be revealed: everything is simply there */
+    html:not(.js) .reveal {
+        opacity: 1;
+        transform: none;
+    }
+
+    html:not(.js) .reveal-photo > .photo-frame {
+        clip-path: none;
+    }
+
+    html:not(.js) .reveal-photo .card-photo {
+        transform: none;
+    }
+
+    /* ---- the menu on phones ---- */
+
+    @media (max-width: 767px) {
+        .nav-links {
+            display: none;
+            transform-origin: top right;
+            transition: opacity 180ms var(--ease-out-strong), transform 180ms var(--ease-out-strong);
+        }
+
+        .nav-links.show {
+            display: flex;
+        }
+
+        @starting-style {
+            .nav-links.show {
+                opacity: 0;
+                transform: translateY(-6px) scale(0.97);
+            }
+        }
+    }
+
+    /* ---- people who ask for less motion: things fade, nothing travels ---- */
+
+    @media (prefers-reduced-motion: reduce) {
+        html {
+            scroll-behavior: auto;
+        }
+
+        .slide.is-current > * {
+            animation: none;
+        }
+
+        .slide.is-entering,
+        .slide.is-entering.is-back {
+            clip-path: none;
+            opacity: 0;
+        }
+
+        .slide.is-entering > *,
+        .slide.is-entering.is-back > * {
+            transform: none;
+        }
+
+        .slide.is-entering.is-in {
+            opacity: 1;
+            transition: opacity 400ms ease;
+        }
+
+        .slide.is-entering.is-in > * {
+            transition: none;
+        }
+
+        .slide-dot[aria-current="true"]::after {
+            animation: none;
+            transform: none;
+        }
+
+        .line-in,
+        .fade-up {
+            animation: fade-only 400ms ease both;
+        }
+
+        .reveal,
+        .reveal-photo > .photo-frame,
+        .reveal-photo .card-photo {
+            clip-path: none;
+            transform: none;
+            transition: opacity 400ms ease;
+        }
+
+        .reveal-photo > .photo-frame {
+            opacity: 0;
+        }
+
+        .reveal-photo.is-visible > .photo-frame {
+            opacity: 1;
+        }
+
+        .nav-links {
+            transform: none !important;
+        }
+    }
+
+    @keyframes fade-only {
+        from { opacity: 0; }
+    }
+}

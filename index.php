@@ -3,6 +3,14 @@ session_start();
 
 require_once __DIR__ . "/config/database.php";
 require_once __DIR__ . "/includes/icons.php";
+require_once __DIR__ . "/includes/photos.php";
+require_once __DIR__ . "/includes/hero-scenes.php";
+
+/*
+ * The landing page. Its look is written with Tailwind CSS classes: they are collected from
+ * this file into assets/site.css (see assets/tailwind.css and build-css.bat). After changing
+ * classes here, build the CSS again.
+ */
 
 $isLoggedIn = isset($_SESSION["user_id"]);
 $isCustomer = $isLoggedIn && ($_SESSION["role"] ?? "") === "customer";
@@ -13,7 +21,7 @@ $stmt = $pdo->query("
     FROM rooms
     WHERE status = 'available'
     ORDER BY id DESC
-    LIMIT 3
+    LIMIT 4
 ");
 $rooms = $stmt->fetchAll();
 
@@ -48,1031 +56,583 @@ try {
 } catch (PDOException $e) {
     // Keep defaults until the site_settings table is created.
 }
+
+// only colors like #c9a27f are ever printed into the page's styles
+foreach (["hero_card_bg_start" => "#c9a27f", "hero_card_bg_end" => "#7b5841"] as $key => $fallback) {
+    if (!preg_match('/^#[0-9a-fA-F]{6}$/', $siteSettings[$key])) {
+        $siteSettings[$key] = $fallback;
+    }
+}
+
+
+// ======================================================
+// THE LARGE PICTURES
+// 1. the photos chosen for the homepage (Admin → Settings → Homepage photos)
+// 2. otherwise the rooms' own photos: the first photo of each room, then their others
+// 3. otherwise three drawn scenes, until real photos are uploaded
+// ======================================================
+
+$roomPhotos = [];
+
+foreach ($rooms as $room) {
+    $roomPhotos[(int) $room["id"]] = photo_list("rooms/room_" . (int) $room["id"]);
+}
+
+$slides = [];
+
+foreach (photo_list("home/hero") as $photo) {
+    $slides[] = ["photo" => $photo, "scene" => ""];
+}
+
+if (!$slides) {
+    for ($slot = 1; $slot <= PHOTO_SLOTS && count($slides) < PHOTO_SLOTS; $slot++) {
+        foreach ($roomPhotos as $photos) {
+            if (isset($photos[$slot]) && count($slides) < PHOTO_SLOTS) {
+                $slides[] = ["photo" => $photos[$slot], "scene" => ""];
+            }
+        }
+    }
+}
+
+$drawn = !$slides;
+
+if ($drawn) {
+    $slides = [
+        ["photo" => "", "scene" => "dusk"],
+        ["photo" => "", "scene" => "night"],
+        ["photo" => "", "scene" => "dawn"],
+    ];
+}
+
+// The homepage's own photos (assets/photos, 4:3): name.jpg is 1200 pixels wide, name-800.jpg 800.
+// Returns what an <img> needs, or null when a file is missing.
+function site_photo(string $name): ?array
+{
+    $files = [];
+
+    foreach (["large" => $name . ".jpg", "small" => $name . "-800.jpg"] as $size => $file) {
+        if (!is_file(__DIR__ . "/assets/photos/" . $file)) {
+            return null;
+        }
+
+        $files[$size] = "assets/photos/" . $file . "?v=" . filemtime(__DIR__ . "/assets/photos/" . $file);
+    }
+
+    return ["src" => $files["large"], "srcset" => $files["small"] . " 800w, " . $files["large"] . " 1200w"];
+}
+
+$aboutPhoto = site_photo("house");
+
+// "Inside ARVE'S House": each photo with the words guests read under it
+$inside = array_values(array_filter([
+    ["photo" => site_photo("living"), "title" => "Living and dining", "text" => "A sofa, a dining table and board games"],
+    ["photo" => site_photo("kitchen"), "title" => "Kitchen", "text" => "Sink, induction cooker, rice cooker and kettle"],
+    ["photo" => site_photo("bathroom"), "title" => "Bathroom", "text" => "Sink, soap and a bidet spray"],
+    ["photo" => site_photo("smart-tv"), "title" => "Smart TV with Disney+", "text" => "For movie nights during your stay"],
+], fn (array $item): bool => $item["photo"] !== null));
+
+
+// ======================================================
+// CLASSES USED MORE THAN ONCE
+// ======================================================
+
+$button = "inline-flex min-h-12 cursor-pointer items-center justify-center gap-2 rounded-[11px] border border-transparent px-6 "
+    . "text-[13px] font-extrabold transition-transform duration-150 ease-out-strong hover:-translate-y-0.5 "
+    . "active:translate-y-0 active:scale-[0.97] motion-reduce:transform-none";
+
+$buttonBrown = $button . " bg-linear-to-br from-brown-500 to-brown-700 text-white shadow-[0_10px_25px_rgba(90,56,38,0.25)]";
+$buttonGlass = $button . " border-white/30 bg-white/10 text-white backdrop-blur-md";
+$buttonGold = $button . " bg-gold text-brown-900 shadow-[0_10px_25px_rgba(0,0,0,0.25)]";
+
+$eyebrow = "text-[11px] font-extrabold uppercase tracking-[4px]";
+
+$navLink = "rounded-[9px] px-3.5 py-2.5 text-[13px] font-semibold transition-colors duration-200 hover:bg-current/10 "
+    . "focus-visible:bg-current/10 max-md:flex max-md:min-h-[46px] max-md:items-center max-md:justify-center max-md:text-[15px]";
+
+$navButton = $navLink . " transition-transform duration-150 ease-out-strong active:scale-[0.97]";
+
+$heroIcon = in_array(trim($siteSettings["hero_card_icon"]), ["🏡", "🏠", "⌂", ""], true)
+    ? icon("home")
+    : htmlspecialchars($siteSettings["hero_card_icon"]);
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<meta name="theme-color" content="#fffaf4">
+<meta name="theme-color" content="#1a110d">
+<meta name="description" content="ARVE'S House: comfortable rooms and simple online reservations. Check availability and book your stay.">
 <title>ARVE'S House | Transient & Reservation</title>
 
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-html{
-    scroll-behavior:smooth;
-    -webkit-tap-highlight-color:transparent;
-    -webkit-text-size-adjust:100%;
-    text-size-adjust:100%;
-}
-:root{
-    --ease-out:cubic-bezier(0.23, 1, 0.32, 1);
-    --ease-in-out:cubic-bezier(0.77, 0, 0.175, 1);
-    --ease-drawer:cubic-bezier(0.32, 0.72, 0, 1);
-    --cream:#fffaf4;
-    --cream2:#f4e7d9;
-    --brown:#7a4f36;
-    --brown2:#5a3826;
-    --brown3:#2d1d16;
-    --gold:#d4a76a;
-    --text:#241a15;
-    --muted:#786d66;
-    --white:rgba(255,255,255,.93);
-    --border:rgba(122,79,54,.14);
-    --shadow:0 18px 50px rgba(76,50,34,.10);
-}
-body{
-    font-family:Arial,Helvetica,sans-serif;
-    color:var(--text);
-    line-height:1.6;
-    background:
-        radial-gradient(circle at 7% 10%,rgba(212,167,106,.24),transparent 28%),
-        radial-gradient(circle at 92% 40%,rgba(122,79,54,.12),transparent 28%),
-        linear-gradient(135deg,#fffdf9 0%,#f8f0e6 48%,#eee0d1 100%);
-    min-height:100vh;
-    min-height:100svh;
-}
-a{text-decoration:none;color:inherit}
-button,input{font:inherit}
-img{max-width:100%;height:auto}
-button,a,input{touch-action:manipulation}
-button,.btn,.room-btn,.nav-links a{-webkit-user-select:none;user-select:none}
-button,a{ -webkit-tap-highlight-color:transparent }
-input[type="date"]{min-height:44px}
-body.menu-open{overflow:hidden}
+<script>
+    // pages that can run scripts wait with their reveals; others show everything at once
+    document.documentElement.classList.add("js");
+</script>
 
-/* NAV */
-.navbar{
-    height:78px;
-    padding:0 7%;
-    display:flex;
-    align-items:center;
-    justify-content:space-between;
-    position:sticky;
-    top:0;
-    z-index:1000;
-    background:rgba(255,250,244,.90);
-    backdrop-filter:blur(16px);
-    border-bottom:1px solid var(--border);
-}
-.logo{display:flex;align-items:center;gap:12px;font-weight:800;font-size:21px}
-.logo-mark{
-    width:43px;height:43px;border-radius:13px;
-    display:grid;place-items:center;
-    background:linear-gradient(135deg,var(--brown),var(--brown2));
-    color:#fff;font-size:21px;
-    box-shadow:0 8px 20px rgba(90,56,38,.20);
-}
-.logo small{display:block;font-size:9px;font-weight:500;letter-spacing:1.2px;color:var(--muted)}
-.nav-links{display:flex;align-items:center;gap:6px}
-.nav-links a{padding:9px 13px;border-radius:9px;font-size:13px;font-weight:600}
-@media (hover:hover) and (pointer:fine){
-    .nav-links a:hover{background:rgba(122,79,54,.08);color:var(--brown)}
-}
-.nav-links a:focus-visible,
-.nav-links a:not(.register-btn):active{background:rgba(122,79,54,.08);color:var(--brown)}
-.nav-links .login-btn{border:1px solid var(--border)}
-.nav-links .register-btn{
-    background:linear-gradient(135deg,var(--brown),var(--brown2));
-    color:#fff;padding-left:18px;padding-right:18px;
-}
-.nav-links .login-btn,
-.nav-links .register-btn{transition:transform 140ms var(--ease-out)}
-.nav-links .login-btn:active,
-.nav-links .register-btn:active{transform:scale(.97)}
-.mobile-menu{
-    display:none;border:0;background:transparent;font-size:25px;cursor:pointer;
-    transition:transform 140ms var(--ease-out),background-color 180ms ease;
-}
+<link rel="stylesheet" href="assets/site.css?v=<?= (int) @filemtime(__DIR__ . "/assets/site.css") ?>">
 
-/* HERO */
-.hero{
-    min-height:600px;
-    padding:75px 7% 95px;
-    display:flex;
-    align-items:center;
-    position:relative;
-    overflow:hidden;
-}
-.hero:before{
-    content:"";position:absolute;width:520px;height:520px;border-radius:50%;
-    left:-210px;top:-270px;border:70px solid rgba(212,167,106,.11);
-}
-.hero:after{
-    content:"";position:absolute;width:420px;height:420px;border-radius:50%;
-    right:-170px;bottom:-190px;background:rgba(122,79,54,.06);
-}
-.hero-inner{
-    max-width:1180px;width:100%;margin:auto;position:relative;z-index:2;
-    display:grid;grid-template-columns:1.15fr .85fr;gap:70px;align-items:center;
-}
-.eyebrow{
-    display:inline-block;color:var(--brown);font-size:11px;font-weight:800;
-    letter-spacing:4px;text-transform:uppercase;margin-bottom:17px;
-}
-.hero h1{
-    font-family:Georgia,"Times New Roman",serif;
-    font-size:clamp(48px,6vw,78px);
-    line-height:1.03;letter-spacing:-2px;margin-bottom:22px;
-}
-.hero h1 span{color:var(--brown)}
-.hero p{max-width:610px;color:var(--muted);font-size:17px;margin-bottom:30px}
-.hero-buttons{display:flex;gap:12px;flex-wrap:wrap}
-.btn{
-    display:inline-flex;align-items:center;justify-content:center;
-    min-height:48px;padding:0 23px;border-radius:11px;font-size:13px;font-weight:800;
-    transition:transform 140ms var(--ease-out);border:1px solid transparent;
-}
-@media (hover:hover) and (pointer:fine){
-    .btn:hover{transform:translateY(-2px)}
-}
-.btn:active{transform:translateY(0) scale(.97)}
-.btn-primary{background:linear-gradient(135deg,var(--brown),var(--brown2));color:#fff;box-shadow:0 10px 25px rgba(90,56,38,.20)}
-.btn-secondary{background:rgba(255,255,255,.62);border-color:var(--border);color:var(--brown3)}
-.hero-card{
-    background:rgba(255,255,255,.72);backdrop-filter:blur(16px);
-    border:1px solid rgba(255,255,255,.8);border-radius:28px;padding:30px;
-    box-shadow:var(--shadow);transform:rotate(1deg);
-}
-.hero-card-inner{
-    min-height:315px;border-radius:20px;
-    background:linear-gradient(
-        145deg,
-        <?= htmlspecialchars($siteSettings["hero_card_bg_start"]) ?>,
-        <?= htmlspecialchars($siteSettings["hero_card_bg_end"]) ?>
-    );
-    display:flex;flex-direction:column;align-items:center;justify-content:center;
-    color:#fff;text-align:center;padding:30px;
-}
-.hero-card-inner .house{font-size:95px;line-height:1;margin-bottom:12px}
-.hero-card-inner h2{
-    font-family:Georgia,"Times New Roman",serif;
-    font-size:30px;
-    margin:0 0 6px;
-    color:#fff;
-}
-.hero-card-inner p{
-    font-size:12px;
-    opacity:.88;
-    margin:0;
-}
+<?php if (!$drawn): ?>
+    <link rel="preload" as="image" href="<?= htmlspecialchars($slides[0]["photo"]) ?>" fetchpriority="high">
+<?php endif; ?>
 
-/* SEARCH */
-.search-wrap{max-width:1060px;margin:-42px auto 0;padding:0 20px;position:relative;z-index:5}
-.search-card{
-    background:var(--white);border:1px solid rgba(255,255,255,.9);border-radius:18px;
-    box-shadow:var(--shadow);padding:18px;display:grid;grid-template-columns:1fr 1fr auto;
-    gap:14px;align-items:end;backdrop-filter:blur(14px);
-}
-.search-field{padding:0 14px;border-right:1px solid var(--border)}
-.search-field label{display:block;font-size:11px;font-weight:800;margin-bottom:7px;color:var(--brown3)}
-.search-field input{width:100%;border:0;background:transparent;outline:0;color:var(--muted)}
-.search-btn{
-    height:52px;border:0;border-radius:11px;padding:0 28px;cursor:pointer;
-    background:linear-gradient(135deg,var(--brown),var(--brown2));color:#fff;font-weight:800;
-    transition:transform 140ms var(--ease-out);
-}
-.search-btn:active{transform:scale(.97)}
-
-/* ALERT */
-.alert-wrapper{max-width:1180px;margin:28px auto 0;padding:0 20px}
-.alert{
-    background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;
-    border-radius:12px;padding:14px 18px;display:flex;justify-content:space-between;gap:15px
-}
-.alert a{font-weight:800;text-decoration:underline}
-
-/* SECTIONS */
-.section{padding:90px 7%}
-.section-inner{max-width:1180px;margin:auto}
-.section-heading{text-align:center;max-width:720px;margin:0 auto 46px}
-.section-heading span{color:var(--brown);font-size:10px;font-weight:800;letter-spacing:3px;text-transform:uppercase}
-.section-heading h2{font-family:Georgia,"Times New Roman",serif;font-size:clamp(34px,4vw,48px);line-height:1.15;margin:8px 0 12px}
-.section-heading p{color:var(--muted);font-size:14px}
-
-/* FEATURES */
-.features{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
-.feature-card{
-    background:rgba(255,255,255,.76);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.8);
-    border-radius:20px;padding:28px;text-align:center;box-shadow:0 12px 35px rgba(76,50,34,.06)
-}
-.feature-icon{
-    width:58px;height:58px;margin:0 auto 16px;border-radius:17px;display:grid;place-items:center;
-    background:linear-gradient(135deg,#f6e6d3,#ead1b4);font-size:25px
-}
-.feature-card h3{font-size:16px;margin-bottom:7px}
-.feature-card p{font-size:13px;color:var(--muted)}
-
-/* ROOMS */
-.rooms-section{background:rgba(255,255,255,.34)}
-.rooms-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
-.room-card{
-    background:rgba(255,255,255,.92);border:1px solid rgba(255,255,255,.85);
-    border-radius:20px;overflow:hidden;box-shadow:var(--shadow);transition:transform 180ms var(--ease-out)
-}
-@media (hover:hover) and (pointer:fine){
-    .room-card:hover{transform:translateY(-5px)}
-}
-.room-visual{
-    height:220px;background:linear-gradient(145deg,#c5a07f,#74513b);
-    display:grid;place-items:center;color:white;position:relative
-}
-.room-visual .bed{font-size:70px}
-.room-badge{
-    position:absolute;top:14px;right:14px;background:#fff;color:#456a46;
-    border-radius:20px;padding:6px 10px;font-size:10px;font-weight:800
-}
-.room-body{padding:21px}
-.room-head{display:flex;justify-content:space-between;gap:15px;align-items:start;margin-bottom:9px}
-.room-name{font-family:Georgia,serif;font-size:21px}
-.room-price{font-size:18px;font-weight:800;color:var(--brown);white-space:nowrap}
-.room-price small{display:block;font-size:10px;color:var(--muted);font-weight:500;text-align:right}
-.room-description{font-size:12px;color:var(--muted);min-height:58px;margin-bottom:14px}
-.room-meta{font-size:12px;color:var(--muted);padding:12px 0;border-top:1px solid var(--border);margin-bottom:13px}
-.room-btn{
-    width:100%;min-height:44px;border:0;border-radius:10px;
-    display:flex;align-items:center;justify-content:center;
-    background:linear-gradient(135deg,var(--brown),var(--brown2));
-    color:#fff;font-size:12px;font-weight:800;cursor:pointer;
-    transition:transform 140ms var(--ease-out)
-}
-.login-to-book{background:linear-gradient(135deg,#b37a50,#7a4f36)}
-.room-btn:disabled{background:#d6d0ca;color:#7d756f;cursor:not-allowed}
-.room-btn:active:not(:disabled){transform:scale(.97)}
-.view-all{text-align:center;margin-top:34px}
-
-/* ABOUT */
-.about-wrap{
-    display:grid;grid-template-columns:.9fr 1.1fr;gap:55px;align-items:center;
-    max-width:1180px;margin:auto
-}
-.about-visual{
-    min-height:390px;border-radius:28px;background:linear-gradient(145deg,#b98e6d,#694936);
-    box-shadow:var(--shadow);display:grid;place-items:center;color:#fff;font-size:100px
-}
-.about-copy .eyebrow{margin-bottom:8px}
-.about-copy h2{font-family:Georgia,serif;font-size:clamp(34px,4vw,48px);line-height:1.12;margin-bottom:18px}
-.about-copy p{color:var(--muted);margin-bottom:14px}
-
-/* CTA */
-.cta{padding:75px 7%}
-.cta-box{
-    max-width:1180px;margin:auto;border-radius:28px;padding:55px 30px;text-align:center;
-    background:linear-gradient(135deg,#7a4f36,#4d3021);color:#fff;
-    box-shadow:0 22px 55px rgba(74,46,31,.20)
-}
-.cta-box h2{font-family:Georgia,serif;font-size:clamp(31px,4vw,45px);margin-bottom:10px}
-.cta-box p{max-width:620px;margin:0 auto 22px;color:#eadfd8}
-.cta-box .btn{background:#fff;color:var(--brown3)}
-
-/* FOOTER */
-footer{padding:45px 7% 25px;background:#2d1d16;color:#d8c9bf}
-.footer-inner{max-width:1180px;margin:auto;display:flex;justify-content:space-between;gap:30px;align-items:center}
-footer h3{font-family:Georgia,serif;color:#fff;font-size:22px}
-footer p{font-size:12px;color:#bdaea5}
-.footer-copy{max-width:1180px;margin:28px auto 0;padding-top:20px;border-top:1px solid rgba(255,255,255,.1);font-size:11px;color:#a9988e}
-
-/* ENTRANCE MOTION (one-time, on load; content stays visible if unsupported) */
-@keyframes arve-rise{from{opacity:0;translate:0 8px}}
-@keyframes arve-drop{from{opacity:0;translate:0 -4px}}
-.hero-inner > *,
-.search-card{animation:arve-rise 300ms var(--ease-out) both}
-.hero-inner > :nth-child(2){animation-delay:60ms}
-.search-card{animation-delay:120ms}
-.alert{animation:arve-drop 240ms var(--ease-out) both}
-
-/* RESPONSIVE */
-@media(max-width:1050px){
-    .navbar{padding:0 5%}
-    .hero{padding-left:5%;padding-right:5%}
-    .section{padding-left:5%;padding-right:5%}
-}
-
-@media(max-width:950px){
-    .hero{
-        min-height:auto;
-        padding-top:58px;
-        padding-bottom:88px;
-    }
-    .hero-inner{
-        grid-template-columns:1fr;
-        gap:34px;
-    }
-    .hero-card{
-        display:block;
-        max-width:560px;
-        width:100%;
-        margin:0 auto;
-        transform:none;
-    }
-    .hero-card-inner{min-height:250px}
-    .hero-card-inner .house{font-size:76px}
-    .features,.rooms-grid{grid-template-columns:repeat(2,1fr)}
-    .about-wrap{grid-template-columns:1fr;gap:35px}
-    .about-visual{min-height:280px}
-}
-
-@media(max-width:780px){
-    .navbar{
-        height:72px;
-        padding:0 18px;
-    }
-
-    .logo{
-        font-size:18px;
-        min-width:0;
-    }
-
-    .logo-mark{
-        width:40px;
-        height:40px;
-        border-radius:12px;
-        flex:0 0 40px;
-    }
-
-    .logo small{
-        font-size:8px;
-        letter-spacing:.8px;
-        white-space:nowrap;
-    }
-
-    .mobile-menu{
-        display:grid;
-        place-items:center;
-        width:44px;
-        height:44px;
-        border-radius:10px;
-        font-size:24px;
-        color:var(--brown3);
-        position:relative;
-        z-index:1002;
-    }
-
-    @media (hover:hover) and (pointer:fine){
-        .mobile-menu:hover{
-            background:rgba(122,79,54,.08);
-            outline:none;
-        }
-    }
-
-    .mobile-menu:focus-visible{
-        background:rgba(122,79,54,.08);
-        outline:none;
-    }
-
-    .mobile-menu:active{
-        background:rgba(122,79,54,.08);
-        transform:scale(.97);
-    }
-
-    .nav-links{
-        display:none;
-        position:fixed;
-        top:72px;
-        left:0;
-        right:0;
-        max-height:calc(100vh - 72px);
-        max-height:calc(100dvh - 72px);
-        overflow:auto;
-        overscroll-behavior:contain;
-        padding:16px 18px calc(22px + env(safe-area-inset-bottom,0px));
-        background:rgba(255,250,244,.985);
-        backdrop-filter:blur(18px);
-        flex-direction:column;
-        align-items:stretch;
-        gap:7px;
-        border-bottom:1px solid var(--border);
-        box-shadow:0 16px 35px rgba(76,50,34,.10);
-    }
-
-    .nav-links{
-        transform-origin:top right;
-        transition:opacity 180ms var(--ease-out),transform 180ms var(--ease-out);
-    }
-
-    .nav-links.show{display:flex}
-
-    @starting-style{
-        .nav-links.show{
-            opacity:0;
-            transform:translateY(-6px) scale(.97);
-        }
-    }
-
-    .nav-links a{
-        min-height:46px;
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        text-align:center;
-        padding:11px 14px;
-    }
-
-    .nav-links .register-btn,
-    .nav-links .login-btn{
-        width:100%;
-    }
-
-    .hero{
-        padding:46px 18px 80px;
-    }
-
-    .hero:before{
-        width:320px;
-        height:320px;
-        left:-180px;
-        top:-180px;
-        border-width:48px;
-    }
-
-    .hero:after{
-        width:280px;
-        height:280px;
-        right:-150px;
-        bottom:-100px;
-    }
-
-    .hero-inner{
-        gap:28px;
-    }
-
-    .eyebrow{
-        font-size:9px;
-        letter-spacing:2.5px;
-        margin-bottom:12px;
-    }
-
-    .hero h1{
-        font-size:clamp(40px,12vw,58px);
-        letter-spacing:-1.2px;
-        margin-bottom:16px;
-    }
-
-    .hero p{
-        font-size:15px;
-        margin-bottom:23px;
-    }
-
-    .hero-buttons{
-        display:grid;
-        grid-template-columns:1fr;
-        gap:10px;
-    }
-
-    .hero-buttons .btn{
-        width:100%;
-        min-height:50px;
-    }
-
-    .hero-card{
-        max-width:100%;
-        padding:16px;
-        border-radius:22px;
-    }
-
-    .hero-card-inner{
-        min-height:215px;
-        border-radius:17px;
-        padding:22px 18px;
-    }
-
-    .hero-card-inner .house{
-        font-size:64px;
-    }
-
-    .hero-card-inner h2{
-        font-size:25px;
-    }
-
-    .search-wrap{
-        margin:-35px auto 0;
-        padding:0 14px;
-    }
-
-    .search-card{
-        grid-template-columns:1fr;
-        gap:0;
-        padding:12px;
-        border-radius:16px;
-    }
-
-    .search-field{
-        border-right:0;
-        border-bottom:1px solid var(--border);
-        padding:12px 8px;
-    }
-
-    .search-field input{
-        min-height:42px;
-        width:100%;
-        font-size:16px;
-    }
-
-    .search-btn{
-        width:100%;
-        min-height:50px;
-        height:auto;
-        margin-top:10px;
-        padding:12px 18px;
-    }
-
-    .alert-wrapper{
-        margin-top:22px;
-        padding:0 14px;
-    }
-
-    .alert{
-        flex-direction:column;
-        align-items:flex-start;
-        padding:13px 14px;
-        font-size:12px;
-    }
-
-    .section{
-        padding:64px 18px;
-    }
-
-    .section-heading{
-        margin-bottom:30px;
-    }
-
-    .section-heading h2{
-        font-size:clamp(30px,9vw,40px);
-    }
-
-    .section-heading p{
-        font-size:13px;
-    }
-
-    .features,.rooms-grid{
-        grid-template-columns:1fr;
-        gap:16px;
-    }
-
-    .feature-card{
-        padding:23px 20px;
-    }
-
-    .room-card:hover{
-        transform:none;
-    }
-
-    .room-visual{
-        height:210px;
-    }
-
-    .room-head{
-        gap:10px;
-    }
-
-    .room-name{
-        font-size:20px;
-    }
-
-    .room-price{
-        font-size:16px;
-    }
-
-    .room-btn{
-        min-height:48px;
-    }
-
-    .about-wrap{
-        gap:25px;
-    }
-
-    .about-visual{
-        min-height:230px;
-        font-size:78px;
-        border-radius:22px;
-    }
-
-    .about-copy h2{
-        font-size:clamp(30px,9vw,40px);
-    }
-
-    .about-copy p{
-        font-size:14px;
-    }
-
-    .about-copy .btn{
-        width:100%;
-    }
-
-    .cta{
-        padding:54px 18px;
-    }
-
-    .cta-box{
-        padding:38px 20px;
-        border-radius:22px;
-    }
-
-    .cta-box h2{
-        font-size:clamp(28px,9vw,38px);
-    }
-
-    .cta-box p{
-        font-size:13px;
-    }
-
-    .cta-box .btn{
-        width:100%;
-    }
-
-    footer{
-        padding:35px 18px calc(22px + env(safe-area-inset-bottom,0px));
-    }
-
-    .footer-inner{
-        flex-direction:column;
-        align-items:flex-start;
-        gap:16px;
-    }
-
-    .footer-copy{
-        margin-top:20px;
-    }
-}
-
-@media(max-width:430px){
-    .navbar{padding:0 14px}
-    .logo{font-size:16px;gap:9px}
-    .logo-mark{
-        width:38px;
-        height:38px;
-        flex-basis:38px;
-        font-size:19px;
-    }
-    .logo small{
-        font-size:7px;
-        max-width:180px;
-        overflow:hidden;
-        text-overflow:ellipsis;
-    }
-
-    .hero{
-        padding-left:14px;
-        padding-right:14px;
-    }
-
-    .hero h1{
-        font-size:clamp(36px,12vw,48px);
-    }
-
-    .hero p{
-        font-size:14px;
-    }
-
-    .hero-card{
-        padding:12px;
-    }
-
-    .hero-card-inner{
-        min-height:190px;
-    }
-
-    .hero-card-inner .house{
-        font-size:56px;
-    }
-
-    .hero-card-inner h2{
-        font-size:22px;
-    }
-
-    .section{
-        padding-left:14px;
-        padding-right:14px;
-    }
-
-    .room-body{
-        padding:18px;
-    }
-
-    .room-head{
-        flex-direction:column;
-        align-items:flex-start;
-    }
-
-    .room-price small{
-        display:inline;
-        margin-left:4px;
-    }
-
-    .about-visual{
-        min-height:200px;
-        font-size:68px;
-    }
-
-    .cta{
-        padding-left:14px;
-        padding-right:14px;
-    }
-}
-
-@media(max-width:360px){
-    .logo small{display:none}
-    .hero h1{font-size:34px}
-    .hero-card-inner{min-height:175px}
-    .section-heading h2,
-    .about-copy h2,
-    .cta-box h2{font-size:28px}
-}
-
-/* SAFE AREAS (viewport-fit=cover): sticky header clears the notch/status bar */
-.navbar{
-    padding-top:env(safe-area-inset-top,0px);
-    height:calc(78px + env(safe-area-inset-top,0px));
-}
-
-@media(max-width:780px){
-    .navbar{height:calc(72px + env(safe-area-inset-top,0px))}
-    .nav-links{
-        top:calc(72px + env(safe-area-inset-top,0px));
-        max-height:calc(100vh - 72px - env(safe-area-inset-top,0px));
-        max-height:calc(100dvh - 72px - env(safe-area-inset-top,0px));
-    }
-}
-
-/* REDUCED MOTION: keep fades, drop movement */
-@media (prefers-reduced-motion: reduce){
-    html{scroll-behavior:auto}
-    .btn:hover,
-    .btn:active,
-    .room-card:hover,
-    .search-btn:active,
-    .room-btn:active,
-    .mobile-menu:active,
-    .nav-links .login-btn:active,
-    .nav-links .register-btn:active,
-    .nav-links.show{transform:none !important}
-    .hero-inner > *,
-    .search-card,
-    .alert{translate:none !important;animation-delay:0ms !important}
-    *,*::before,*::after{animation-duration:1ms !important;animation-iteration-count:1 !important}
-}
-</style>
-<style>
-/* Phone polish: smaller icons and tighter cards on small screens */
-@media (max-width:560px){
-    .hero-card-inner{min-height:160px}
-    .hero-card-inner .house{font-size:40px;margin-bottom:8px}
-    .feature-card{padding:22px 18px}
-    .feature-icon{width:46px;height:46px;border-radius:14px;margin-bottom:12px;font-size:20px}
-    .room-visual{height:170px}
-    .room-visual .bed{font-size:44px}
-    .about-visual{min-height:160px;font-size:46px}
-}
-</style>
 <?php require __DIR__ . "/includes/glass.php"; ?>
 </head>
 
 <body>
 
-<nav class="navbar">
-    <a href="index.php" class="logo">
-        <span class="logo-mark"><?= icon("home") ?></span>
-        <span>
-            ARVE'S House
-            <small>YOUR HOME AWAY FROM HOME</small>
-        </span>
-    </a>
+<!-- ======================================================
+     MENU: clear over the picture, solid once the page has scrolled
+====================================================== -->
 
-    <button class="mobile-menu" id="mobileMenuButton" onclick="toggleMenu()" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="navLinks"><?= icon("menu") ?></button>
+<header
+    class="fixed inset-x-0 top-0 z-[1000] pt-[env(safe-area-inset-top,0px)] text-white transition-[background-color,box-shadow,color] duration-300 data-solid:bg-cream/92 data-solid:text-ink data-solid:shadow-[0_1px_0_rgba(122,79,54,0.14),0_10px_30px_rgba(76,50,34,0.08)] data-solid:backdrop-blur-xl"
+    data-nav
+>
+    <div class="mx-auto flex h-[72px] max-w-[1320px] items-center justify-between gap-4 px-[18px] md:h-20 md:px-8 lg:px-10">
 
-    <div class="nav-links" id="navLinks">
-        <a href="index.php">Home</a>
-        <a href="rooms.php">Rooms</a>
-        <a href="#about">About</a>
+        <a href="index.php" class="flex min-w-0 items-center gap-3 text-[19px] font-extrabold md:text-[21px]">
+            <span class="grid size-[42px] flex-none place-items-center rounded-[13px] bg-linear-to-br from-brown-500 to-brown-700 text-[21px] text-white shadow-[0_8px_20px_rgba(90,56,38,0.28)]"><?= icon("home") ?></span>
+            <span class="leading-tight">
+                ARVE'S House
+                <small class="block whitespace-nowrap text-[8.5px] font-medium tracking-[1.2px] opacity-70">YOUR HOME AWAY FROM HOME</small>
+            </span>
+        </a>
 
-        <?php if ($isCustomer): ?>
-            <a href="customer/dashboard.php">My Reservations</a>
-            <a href="customer/profile.php">My Profile</a>
-            <a href="logout.php" class="register-btn">Logout</a>
-        <?php elseif ($isAdmin): ?>
-            <a href="admin/dashboard.php" class="register-btn">Admin Dashboard</a>
-        <?php else: ?>
-            <a href="login.php" class="login-btn">Login</a>
-            <a href="register.php" class="register-btn">Register</a>
-        <?php endif; ?>
+        <button
+            class="relative z-[1002] grid size-11 cursor-pointer place-items-center rounded-[10px] border-0 bg-transparent text-[24px] text-current transition-transform duration-150 ease-out-strong active:scale-[0.97] md:hidden"
+            id="mobileMenuButton"
+            onclick="toggleMenu()"
+            type="button"
+            aria-label="Open menu"
+            aria-expanded="false"
+            aria-controls="navLinks"
+        ><?= icon("menu") ?></button>
+
+        <nav
+            class="nav-links items-center gap-1.5 md:flex max-md:absolute max-md:inset-x-0 max-md:top-full max-md:max-h-[calc(100dvh-72px)] max-md:flex-col max-md:items-stretch max-md:gap-2 max-md:overflow-auto max-md:overscroll-contain max-md:border-b max-md:border-brown-500/15 max-md:bg-cream max-md:px-[18px] max-md:pt-4 max-md:pb-[calc(22px+env(safe-area-inset-bottom,0px))] max-md:text-ink max-md:shadow-[0_16px_35px_rgba(76,50,34,0.10)]"
+            id="navLinks"
+            aria-label="Main"
+        >
+            <a href="index.php" class="<?= $navLink ?>">Home</a>
+            <a href="rooms.php" class="<?= $navLink ?>">Rooms</a>
+            <a href="#about" class="<?= $navLink ?>">About</a>
+
+            <?php if ($isCustomer): ?>
+                <a href="customer/dashboard.php" class="<?= $navLink ?>">My Reservations</a>
+                <a href="customer/profile.php" class="<?= $navLink ?>">My Profile</a>
+                <a href="logout.php" class="<?= $navButton ?> bg-linear-to-br from-brown-500 to-brown-700 px-[18px] text-white">Logout</a>
+            <?php elseif ($isAdmin): ?>
+                <a href="logout.php" class="<?= $navButton ?> bg-linear-to-br from-brown-500 to-brown-700 px-[18px] text-white">Logout</a>
+            <?php else: ?>
+                <a href="login.php" class="<?= $navButton ?> border border-current/30">Login</a>
+                <a href="register.php" class="<?= $navButton ?> bg-linear-to-br from-brown-500 to-brown-700 px-[18px] text-white">Register</a>
+            <?php endif; ?>
+        </nav>
+
     </div>
-</nav>
+</header>
 
-<?php if ($customerRequired): ?>
-<div class="alert-wrapper">
-    <div class="alert">
-        <div><?= icon("alert") ?> Booking requires a customer account. Administrator accounts cannot create reservations.</div>
-        <?php if ($isAdmin): ?>
-            <a href="admin/dashboard.php">Back to Admin</a>
-        <?php else: ?>
-            <a href="login.php">Customer Login</a>
-        <?php endif; ?>
-    </div>
-</div>
-<?php endif; ?>
 
-<section class="hero">
-    <div class="hero-inner">
-        <div>
-            <span class="eyebrow">Comfort · Relax · Stay</span>
-            <h1>Find your <span>perfect stay.</span></h1>
-            <p>
-                Comfortable rooms, simple reservations and a relaxing place to stay.
-                Discover ARVE'S House and book the room that fits your trip.
-            </p>
+<div class="bg-night">
 
-            <div class="hero-buttons">
-                <a href="rooms.php" class="btn btn-primary">Explore Rooms →</a>
+<!-- ======================================================
+     HERO: large pictures that replace each other, the words on top
+====================================================== -->
 
-                <?php if (!$isLoggedIn): ?>
-                    <a href="login.php" class="btn btn-secondary">Customer Login</a>
-                <?php elseif ($isCustomer): ?>
-                    <a href="customer/dashboard.php" class="btn btn-secondary">My Reservations</a>
+<section class="relative isolate flex min-h-[640px] flex-col overflow-hidden bg-night text-white md:min-h-[88svh]" id="top" data-hero>
+
+    <div class="slides absolute inset-0 -z-30" data-slides aria-hidden="true">
+        <?php foreach ($slides as $index => $slide): ?>
+            <div class="slide<?= $index === 0 ? " is-current" : "" ?>" data-slide>
+                <?php if ($slide["photo"] !== ""): ?>
+                    <?php if ($index === 0): ?>
+                        <img src="<?= htmlspecialchars($slide["photo"]) ?>" alt="" decoding="async" fetchpriority="high">
+                    <?php else: ?>
+                        <!-- fetched by the script shortly before it is shown -->
+                        <img data-src="<?= htmlspecialchars($slide["photo"]) ?>" alt="" decoding="async">
+                    <?php endif; ?>
                 <?php else: ?>
-                    <a href="admin/dashboard.php" class="btn btn-secondary">Admin Dashboard</a>
+                    <?= hero_scene($slide["scene"]) ?>
                 <?php endif; ?>
             </div>
-        </div>
+        <?php endforeach; ?>
+    </div>
 
-        <div class="hero-card">
-            <div class="hero-card-inner">
-                <div class="house">
-                    <?= in_array(trim($siteSettings["hero_card_icon"]), ["🏡", "🏠", "⌂", ""], true) ? icon("home") : htmlspecialchars($siteSettings["hero_card_icon"]) ?>
-                </div>
+    <!-- keeps the words readable on any picture, and lets the picture melt into the rooms below -->
+    <div class="absolute inset-0 -z-20 bg-linear-to-b from-night/75 via-night/40 to-night"></div>
+    <div class="absolute inset-0 -z-20 bg-[radial-gradient(ellipse_65%_50%_at_50%_42%,rgb(26_17_13/0.5),transparent_72%)]"></div>
+    <div class="hero-dim absolute inset-0 -z-10 bg-night"></div>
 
-                <h2>
-                    <?= htmlspecialchars($siteSettings["hero_card_title"]) ?>
-                </h2>
+    <div class="hero-copy mx-auto flex w-full max-w-[980px] flex-1 flex-col items-center justify-center px-5 pt-[120px] pb-[290px] text-center md:pb-[190px]">
 
-                <p>
-                    <?= htmlspecialchars($siteSettings["hero_card_subtitle"]) ?>
-                </p>
+        <?php if ($customerRequired): ?>
+            <div class="fade-up mb-7 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 rounded-xl border border-[#fed7aa] bg-[#fff7ed] px-[18px] py-3 text-left text-[14px] text-[#9a3412]" role="alert">
+                <span><?= icon("alert") ?> Booking requires a customer account. Administrator accounts cannot create reservations.</span>
+                <?php if ($isAdmin): ?>
+                    <a class="font-extrabold underline" href="admin/dashboard.php">Back to Admin</a>
+                <?php else: ?>
+                    <a class="font-extrabold underline" href="login.php">Customer Login</a>
+                <?php endif; ?>
             </div>
+        <?php endif; ?>
+
+        <span class="fade-up <?= $eyebrow ?> mb-5 text-gold" style="--i:0">Comfort · Relax · Stay</span>
+
+        <h1 class="font-display text-[clamp(44px,7.2vw,92px)] leading-[1.02] tracking-[-0.02em] text-balance">
+            <span class="line"><span class="line-in" style="--i:1">Find your</span></span>
+            <span class="line"><span class="line-in text-gold" style="--i:2">perfect stay.</span></span>
+        </h1>
+
+        <p class="fade-up mt-6 max-w-[600px] text-[16px] text-white/80 md:text-[17px]" style="--i:4">
+            Comfortable rooms, simple reservations and a relaxing place to stay.
+            Discover ARVE'S House and book the room that fits your trip.
+        </p>
+
+        <div class="fade-up mt-8 flex flex-wrap justify-center gap-3" style="--i:5">
+            <a href="rooms.php" class="<?= $buttonGold ?> max-sm:px-5">Explore Rooms <?= icon("arrow-right") ?></a>
+
+            <?php if (!$isLoggedIn): ?>
+                <a href="login.php" class="<?= $buttonGlass ?> max-sm:px-5">Customer Login</a>
+            <?php elseif ($isCustomer): ?>
+                <a href="customer/dashboard.php" class="<?= $buttonGlass ?> max-sm:px-5">My Reservations</a>
+            <?php endif; ?>
         </div>
     </div>
+
+    <!-- the homepage card of Admin → Settings, and the controls of the pictures -->
+    <div class="fade-up absolute inset-x-0 bottom-[150px] z-10 mx-auto flex w-full max-w-[1320px] items-end justify-between gap-4 px-5 max-md:bottom-[226px] max-md:justify-center md:px-8 lg:px-10" style="--i:7">
+
+        <div class="flex items-center gap-3 rounded-2xl border border-white/20 bg-white/10 py-2.5 pr-5 pl-2.5 backdrop-blur-md max-md:hidden">
+            <span
+                class="grid size-11 flex-none place-items-center rounded-xl text-[22px] text-white"
+                style="background:linear-gradient(145deg, <?= htmlspecialchars($siteSettings["hero_card_bg_start"]) ?>, <?= htmlspecialchars($siteSettings["hero_card_bg_end"]) ?>)"
+            ><?= $heroIcon ?></span>
+            <span class="leading-tight">
+                <strong class="block font-display text-[17px] font-bold"><?= htmlspecialchars($siteSettings["hero_card_title"]) ?></strong>
+                <span class="block text-[12px] text-white/75"><?= htmlspecialchars($siteSettings["hero_card_subtitle"]) ?></span>
+            </span>
+        </div>
+
+        <?php if (count($slides) > 1): ?>
+            <div class="flex items-center gap-2 rounded-full border border-white/15 bg-black/25 py-1.5 pr-1.5 pl-4 backdrop-blur-md" data-slide-controls>
+                <?php foreach ($slides as $index => $slide): ?>
+                    <button
+                        class="slide-dot relative h-1 w-8 cursor-pointer overflow-hidden rounded-full border-0 bg-white/30 p-0 before:absolute before:-inset-x-1 before:-inset-y-4 before:content-['']"
+                        type="button"
+                        data-slide-to="<?= $index ?>"
+                        aria-label="Picture <?= $index + 1 ?> of <?= count($slides) ?>"
+                        aria-current="<?= $index === 0 ? "true" : "false" ?>"
+                    ></button>
+                <?php endforeach; ?>
+
+                <button
+                    class="ml-1 grid size-9 cursor-pointer place-items-center rounded-full border-0 bg-white/15 text-[15px] text-white transition-transform duration-150 ease-out-strong active:scale-[0.94]"
+                    type="button"
+                    data-slide-pause
+                    aria-label="Stop changing the pictures"
+                    aria-pressed="false"
+                >
+                    <span data-when-playing><?= icon("pause") ?></span>
+                    <span data-when-paused hidden><?= icon("play") ?></span>
+                </button>
+            </div>
+        <?php endif; ?>
+    </div>
+
 </section>
 
-<div class="search-wrap">
-    <form action="rooms.php" method="GET" class="search-card">
-        <div class="search-field">
-            <label for="home_check_in">CHECK-IN</label>
-            <input type="date" id="home_check_in" name="check_in" min="<?= date("Y-m-d") ?>" required>
+
+<!-- ======================================================
+     CHECK AVAILABILITY: rests on the picture, then follows the page
+====================================================== -->
+
+<div class="pointer-events-none relative z-[900] mx-auto -mt-[208px] w-full max-w-[1080px] px-5 md:-mt-[104px] lg:sticky lg:top-[96px]" data-finder-wrap>
+
+    <form
+        action="rooms.php"
+        method="GET"
+        class="fade-up pointer-events-auto grid grid-cols-2 items-end gap-x-3 gap-y-4 rounded-[20px] border border-white/20 bg-white/12 p-4 text-white shadow-[0_24px_60px_rgba(0,0,0,0.35)] backdrop-blur-xl transition-[background-color,border-color] duration-300 md:grid-cols-[1fr_1fr_auto] md:gap-4 md:p-[18px] data-stuck:border-white/10 data-stuck:bg-night/85"
+        style="--i:6"
+        data-finder
+    >
+        <div class="min-w-0 border-white/20 px-2 md:border-r md:px-3.5">
+            <label class="mb-1.5 block text-[11px] font-extrabold tracking-[1.5px] text-white/70" for="home_check_in">CHECK-IN</label>
+            <input class="min-h-11 w-full min-w-0 border-0 bg-transparent text-[16px] text-white scheme-dark outline-0" type="date" id="home_check_in" name="check_in" min="<?= date("Y-m-d") ?>" required>
         </div>
 
-        <div class="search-field">
-            <label for="home_check_out">CHECK-OUT</label>
-            <input type="date" id="home_check_out" name="check_out" min="<?= date("Y-m-d") ?>" required>
+        <div class="min-w-0 border-white/20 px-2 md:border-r md:px-3.5">
+            <label class="mb-1.5 block text-[11px] font-extrabold tracking-[1.5px] text-white/70" for="home_check_out">CHECK-OUT</label>
+            <input class="min-h-11 w-full min-w-0 border-0 bg-transparent text-[16px] text-white scheme-dark outline-0" type="date" id="home_check_out" name="check_out" min="<?= date("Y-m-d") ?>" required>
         </div>
 
-        <button type="submit" class="search-btn"><?= icon("search") ?> Check Availability</button>
+        <button type="submit" class="<?= $buttonGold ?> col-span-2 min-h-[52px] px-7 md:col-span-1">
+            <?= icon("search") ?> Check Availability
+        </button>
     </form>
 </div>
 
-<section class="section">
-    <div class="section-inner">
-        <div class="section-heading">
-            <span>Why Choose Us</span>
-            <h2>Everything you need for a comfortable stay</h2>
-            <p>A simple reservation experience designed for convenience, comfort and peace of mind.</p>
-        </div>
 
-        <div class="features">
-            <div class="feature-card">
-                <div class="feature-icon"><?= icon("bed") ?></div>
-                <h3>Comfortable Rooms</h3>
-                <p>Clean and relaxing rooms prepared to make every visit more comfortable.</p>
-            </div>
-            <div class="feature-card">
-                <div class="feature-icon"><?= icon("calendar") ?></div>
-                <h3>Easy Reservation</h3>
-                <p>Check room availability and create your reservation directly from the website.</p>
-            </div>
-            <div class="feature-card">
-                <div class="feature-icon"><?= icon("lock") ?></div>
-                <h3>Secure Booking</h3>
-                <p>Your reservation and payment workflow stays organized through your customer account.</p>
-            </div>
-        </div>
-    </div>
-</section>
+<!-- ======================================================
+     ROOMS: large cards, uncovered as they scroll into view
+====================================================== -->
 
-<section class="section rooms-section" id="rooms">
-    <div class="section-inner">
-        <div class="section-heading">
-            <span>Our Rooms</span>
-            <h2>Featured Rooms</h2>
-            <p>Choose from our currently available accommodation.</p>
+<section class="px-5 pt-16 pb-24 text-white md:px-8 md:pt-20 lg:px-10" id="rooms">
+    <div class="mx-auto max-w-[1320px]">
+
+        <div class="reveal mb-9 flex flex-wrap items-end justify-between gap-5" data-reveal>
+            <div>
+                <span class="<?= $eyebrow ?> text-gold">Our Rooms</span>
+                <h2 class="mt-2 font-display text-[clamp(32px,4vw,52px)] leading-[1.12]">Featured Rooms</h2>
+                <p class="mt-2 text-[14px] text-white/60">Choose from our currently available accommodation.</p>
+            </div>
+
+            <a href="rooms.php" class="<?= $buttonGlass ?>">View All Rooms <?= icon("arrow-right") ?></a>
         </div>
 
         <?php if (count($rooms) > 0): ?>
-        <div class="rooms-grid">
-            <?php foreach ($rooms as $room): ?>
-                <?php
-                $bookingUrl = "reservation.php?room_id=" . (int) $room["id"];
-                ?>
-                <article class="room-card">
-                    <div class="room-visual">
-                        <span class="room-badge">✓ Available</span>
-                        <span class="bed"><?= icon("bed") ?></span>
-                    </div>
+            <div class="grid gap-5 md:grid-cols-2">
+                <?php foreach ($rooms as $index => $room): ?>
+                    <?php
+                    $bookingUrl = "reservation.php?room_id=" . (int) $room["id"];
+                    $photo = $roomPhotos[(int) $room["id"]][1] ?? "";
+                    $guests = (int) $room["capacity"];
+                    $description = trim((string) ($room["description"] ?? "")) ?: "Comfortable room available for your stay.";
 
-                    <div class="room-body">
-                        <div class="room-head">
-                            <h3 class="room-name"><?= htmlspecialchars($room["room_name"]) ?></h3>
-                            <div class="room-price">
-                                ₱<?= number_format((float) $room["price"], 2) ?>
-                                <small>/ night</small>
+                    // an odd number of rooms: the first one takes the whole width
+                    $wide = count($rooms) % 2 === 1 && $index === 0;
+                    $column = ($index + (count($rooms) % 2 === 1 ? 1 : 0)) % 2;
+                    ?>
+                    <article class="reveal-photo <?= $wide ? "md:col-span-2" : "" ?>" data-reveal style="--i:<?= $wide ? 0 : $column ?>">
+                    <div class="photo-frame group relative isolate aspect-[4/5] overflow-hidden rounded-[22px] bg-brown-900 <?= $wide ? "md:aspect-[16/9] lg:aspect-[21/9]" : "md:aspect-[16/11]" ?>">
+                        <?php if ($photo !== ""): ?>
+                            <img
+                                class="card-photo absolute inset-0 -z-20 size-full max-w-none object-cover transition-[scale] duration-[900ms] ease-out-strong group-hover:scale-[1.05] motion-reduce:scale-100"
+                                src="<?= htmlspecialchars($photo) ?>"
+                                alt="<?= htmlspecialchars($room["room_name"]) ?>"
+                                loading="lazy"
+                                decoding="async"
+                            >
+                        <?php else: ?>
+                            <!-- no photo yet: a drawn bedroom, until one is added in Admin → Rooms → Photos -->
+                            <div class="card-photo absolute inset-0 -z-20 bg-brown-900 transition-[scale] duration-[900ms] ease-out-strong group-hover:scale-[1.05] motion-reduce:scale-100">
+                                <?= room_scene(["dusk", "night", "dawn"][$index % 3], "r" . (int) $room["id"]) ?>
+                            </div>
+                        <?php endif; ?>
+
+                        <div class="absolute inset-0 -z-10 bg-linear-to-t from-black/85 via-black/30 to-black/5"></div>
+                        <div class="absolute inset-0 -z-10 bg-black/55 opacity-0 transition-opacity duration-500 group-focus-within:opacity-100 group-hover:opacity-100"></div>
+
+                        <span class="absolute top-4 left-4 inline-flex items-center gap-1.5 rounded-full bg-white/90 px-3 py-1.5 text-[11px] font-extrabold text-[#2f5d31]">
+                            <?= icon("check") ?> Available
+                        </span>
+
+                        <div class="absolute inset-x-0 bottom-0 p-6 text-center">
+
+                            <!-- steps up to make room for the details (always up on touch screens) -->
+                            <div class="transition-transform duration-500 ease-out-strong group-focus-within:-translate-y-[112px] group-hover:-translate-y-[112px] motion-reduce:transition-none [@media(hover:none)]:-translate-y-[112px]">
+                                <h3 class="font-display text-[26px] leading-tight text-balance"><?= htmlspecialchars($room["room_name"]) ?></h3>
+                                <p class="mt-1 text-[13px] text-white/80">
+                                    Up to <?= $guests ?> guest<?= $guests !== 1 ? "s" : "" ?>
+                                    · ₱<?= number_format((float) $room["price"], 2) ?> / night
+                                </p>
+                            </div>
+
+                            <div class="absolute inset-x-6 bottom-6 translate-y-3 opacity-0 transition-[opacity,translate] duration-500 ease-out-strong group-focus-within:translate-y-0 group-focus-within:opacity-100 group-hover:translate-y-0 group-hover:opacity-100 motion-reduce:translate-y-0 [@media(hover:none)]:translate-y-0 [@media(hover:none)]:opacity-100">
+                                <p class="mx-auto mb-3 line-clamp-1 max-w-[480px] text-[13px] text-white/75"><?= htmlspecialchars($description) ?></p>
+
+                                <?php if ($isCustomer): ?>
+                                    <a href="<?= htmlspecialchars($bookingUrl) ?>" class="<?= $buttonGold ?> min-w-[200px]"><?= icon("calendar") ?> Book Now</a>
+                                <?php elseif (!$isLoggedIn): ?>
+                                    <a href="login.php?redirect=<?= urlencode($bookingUrl) ?>" class="<?= $buttonGold ?> min-w-[200px]"><?= icon("log-in") ?> Login to Book</a>
+                                <?php else: ?>
+                                    <span class="inline-flex min-h-12 min-w-[200px] items-center justify-center rounded-[11px] bg-white/15 px-6 text-[13px] font-extrabold text-white/70">Customer Account Required</span>
+                                <?php endif; ?>
                             </div>
                         </div>
-
-                        <p class="room-description">
-                            <?= htmlspecialchars($room["description"] ?? "Comfortable room available for your stay.") ?>
-                        </p>
-
-                        <div class="room-meta">
-                            <?= icon("users") ?> Up to <?= (int) $room["capacity"] ?>
-                            guest<?= (int) $room["capacity"] !== 1 ? "s" : "" ?>
-                        </div>
-
-                        <?php if ($isCustomer): ?>
-                            <a href="<?= htmlspecialchars($bookingUrl) ?>" class="room-btn"><?= icon("calendar") ?> Book Now</a>
-                        <?php elseif (!$isLoggedIn): ?>
-                            <a href="login.php?redirect=<?= urlencode($bookingUrl) ?>" class="room-btn login-to-book">
-                                <?= icon("log-in") ?> Login to Book
-                            </a>
-                        <?php else: ?>
-                            <button type="button" class="room-btn" disabled>Customer Account Required</button>
-                        <?php endif; ?>
                     </div>
-                </article>
-            <?php endforeach; ?>
-        </div>
+                    </article>
+                <?php endforeach; ?>
+            </div>
         <?php else: ?>
-            <div class="feature-card" style="max-width:700px;margin:auto">
-                <h3>No rooms currently available</h3>
-                <p>Please check again later for room availability.</p>
+            <div class="reveal mx-auto max-w-[700px] rounded-[20px] border border-white/15 bg-white/8 p-8 text-center" data-reveal>
+                <h3 class="mb-1.5 text-[17px] font-bold">No rooms currently available</h3>
+                <p class="text-[14px] text-white/65">Please check again later for room availability.</p>
             </div>
         <?php endif; ?>
 
-        <div class="view-all">
-            <a href="rooms.php" class="btn btn-secondary">View All Rooms →</a>
-        </div>
     </div>
 </section>
 
-<section class="section" id="about">
-    <div class="about-wrap">
-        <div class="about-visual"><?= icon("home") ?></div>
 
-        <div class="about-copy">
-            <span class="eyebrow">About ARVE'S House</span>
-            <h2>A simple, comfortable place to call home for a while.</h2>
-            <p>
+<!-- ======================================================
+     INSIDE ARVE'S HOUSE: large photo cards, uncovered as they scroll into view
+====================================================== -->
+
+<?php if ($inside): ?>
+<section class="px-5 pb-24 text-white md:px-8 lg:px-10" id="inside">
+    <div class="mx-auto max-w-[1320px]">
+
+        <div class="reveal mb-9" data-reveal>
+            <span class="<?= $eyebrow ?> text-gold">Take a Look</span>
+            <h2 class="mt-2 font-display text-[clamp(32px,4vw,52px)] leading-[1.12]">Inside ARVE'S House</h2>
+            <p class="mt-2 text-[14px] text-white/60">Real photos of the place you will stay in.</p>
+        </div>
+
+        <div class="grid gap-5 md:grid-cols-2">
+            <?php foreach ($inside as $index => $item): ?>
+                <div class="reveal-photo" data-reveal style="--i:<?= $index % 2 ?>">
+                    <figure class="photo-frame group relative isolate aspect-[4/3] overflow-hidden rounded-[22px] bg-brown-900">
+                        <img
+                            class="card-photo absolute inset-0 -z-20 size-full max-w-none object-cover transition-[scale] duration-[900ms] ease-out-strong group-hover:scale-[1.05] motion-reduce:scale-100"
+                            src="<?= htmlspecialchars($item["photo"]["src"]) ?>"
+                            srcset="<?= htmlspecialchars($item["photo"]["srcset"]) ?>"
+                            sizes="(min-width: 1400px) 650px, (min-width: 768px) 50vw, 100vw"
+                            width="1200"
+                            height="900"
+                            alt="<?= htmlspecialchars($item["title"]) ?> at ARVE'S House"
+                            loading="lazy"
+                            decoding="async"
+                        >
+                        <div class="absolute inset-0 -z-10 bg-linear-to-t from-black/80 via-black/15 to-transparent"></div>
+
+                        <figcaption class="absolute inset-x-0 bottom-0 p-6 text-center">
+                            <h3 class="font-display text-[24px] leading-tight text-balance"><?= htmlspecialchars($item["title"]) ?></h3>
+                            <p class="mt-1 text-[13px] text-white/80"><?= htmlspecialchars($item["text"]) ?></p>
+                        </figcaption>
+                    </figure>
+                </div>
+            <?php endforeach; ?>
+        </div>
+
+    </div>
+</section>
+<?php endif; ?>
+
+</div>
+
+
+<!-- ======================================================
+     WHY CHOOSE US
+====================================================== -->
+
+<section class="px-5 py-[90px] md:px-8 lg:px-10">
+    <div class="mx-auto max-w-[1180px]">
+
+        <div class="reveal mx-auto mb-[46px] max-w-[720px] text-center" data-reveal>
+            <span class="text-[10px] font-extrabold uppercase tracking-[3px] text-brown-500">Why Choose Us</span>
+            <h2 class="mt-2 mb-3 font-display text-[clamp(34px,4vw,48px)] leading-[1.15] text-balance">Everything you need for a comfortable stay</h2>
+            <p class="text-[14px] text-muted">A simple reservation experience designed for convenience, comfort and peace of mind.</p>
+        </div>
+
+        <div class="grid gap-5 md:grid-cols-3">
+            <?php foreach ([
+                ["bed", "Comfortable Rooms", "Clean and relaxing rooms prepared to make every visit more comfortable."],
+                ["calendar", "Easy Reservation", "Check room availability and create your reservation directly from the website."],
+                ["lock", "Secure Booking", "Your reservation and payment workflow stays organized through your customer account."],
+            ] as $index => [$featureIcon, $title, $text]): ?>
+                <div class="reveal rounded-[20px] border border-white/80 bg-white/75 p-7 text-center shadow-[0_12px_35px_rgba(76,50,34,0.06)] backdrop-blur-md" data-reveal style="--i:<?= $index ?>">
+                    <div class="mx-auto mb-4 grid size-[58px] place-items-center rounded-[17px] bg-linear-to-br from-[#f6e6d3] to-[#ead1b4] text-[25px] text-brown-500"><?= icon($featureIcon) ?></div>
+                    <h3 class="mb-1.5 text-[16px] font-bold"><?= $title ?></h3>
+                    <p class="text-[13px] text-muted"><?= $text ?></p>
+                </div>
+            <?php endforeach; ?>
+        </div>
+
+    </div>
+</section>
+
+
+<!-- ======================================================
+     ABOUT
+====================================================== -->
+
+<section class="px-5 py-[90px] md:px-8 lg:px-10" id="about">
+    <div class="mx-auto grid max-w-[1180px] items-center gap-9 lg:grid-cols-[0.9fr_1.1fr] lg:gap-[55px]">
+
+        <div class="reveal-photo" data-reveal>
+            <?php if ($aboutPhoto): ?>
+                <figure class="photo-frame relative isolate aspect-[4/3] overflow-hidden rounded-[22px] bg-brown-700">
+                    <img
+                        class="card-photo absolute inset-0 -z-10 size-full max-w-none object-cover"
+                        src="<?= htmlspecialchars($aboutPhoto["src"]) ?>"
+                        srcset="<?= htmlspecialchars($aboutPhoto["srcset"]) ?>"
+                        sizes="(min-width: 1024px) 510px, calc(100vw - 40px)"
+                        width="1200"
+                        height="900"
+                        alt="ARVE'S House seen from outside"
+                        loading="lazy"
+                        decoding="async"
+                    >
+
+                    <figcaption class="absolute bottom-3 left-3 flex items-center gap-3 rounded-2xl border border-white/20 bg-black/45 py-2 pr-4 pl-2 text-white backdrop-blur-md md:bottom-4 md:left-4">
+                        <span class="grid size-10 flex-none place-items-center rounded-xl bg-white/15 text-[19px]"><?= icon("home") ?></span>
+                        <span class="leading-tight">
+                            <strong class="block text-[14px]">ARVE'S House</strong>
+                            <span class="block text-[12px] text-white/75">Your home away from home</span>
+                        </span>
+                    </figcaption>
+                </figure>
+            <?php else: ?>
+                <div class="photo-frame relative isolate grid aspect-[4/3] place-items-center overflow-hidden rounded-[22px] bg-linear-to-br from-[#b98e6d] to-[#694936] text-[100px] text-white">
+                    <span class="card-photo"><?= icon("home") ?></span>
+                </div>
+            <?php endif; ?>
+        </div>
+
+        <div class="reveal" data-reveal style="--i:1">
+            <span class="<?= $eyebrow ?> mb-2 inline-block text-brown-500">About ARVE'S House</span>
+            <h2 class="mb-[18px] font-display text-[clamp(34px,4vw,48px)] leading-[1.12] text-balance">A simple, comfortable place to call home for a while.</h2>
+            <p class="mb-3.5 text-muted">
                 ARVE'S House gives guests an accessible way to browse rooms,
                 check availability, create reservations and manage their stay.
             </p>
-            <p>
+            <p class="mb-6 text-muted">
                 Our online reservation system keeps the booking process organized
                 for customers and administrators while maintaining a comfortable,
                 welcoming experience.
             </p>
-            <a href="rooms.php" class="btn btn-primary">Explore Our Rooms</a>
+            <a href="rooms.php" class="<?= $buttonBrown ?>">Explore Our Rooms</a>
         </div>
+
     </div>
 </section>
 
-<section class="cta">
-    <div class="cta-box">
+
+<!-- ======================================================
+     LAST WORD
+====================================================== -->
+
+<section class="px-5 py-[75px] md:px-8 lg:px-10">
+    <div class="reveal mx-auto max-w-[1180px] rounded-[28px] bg-linear-to-br from-brown-500 to-[#4d3021] px-[30px] py-[55px] text-center text-white shadow-[0_22px_55px_rgba(74,46,31,0.20)]" data-reveal>
         <?php if ($isCustomer): ?>
-            <h2>Ready for your next stay?</h2>
-            <p>Choose your dates, check room availability and create your next reservation.</p>
-            <a href="rooms.php" class="btn">Book Your Stay</a>
+            <h2 class="mb-2.5 font-display text-[clamp(31px,4vw,45px)] text-balance">Ready for your next stay?</h2>
+            <p class="mx-auto mb-[22px] max-w-[620px] text-[#eadfd8]">Choose your dates, check room availability and create your next reservation.</p>
+            <a href="rooms.php" class="<?= $button ?> bg-white text-brown-900">Book Your Stay</a>
         <?php elseif (!$isLoggedIn): ?>
-            <h2>Your comfortable stay starts here.</h2>
-            <p>Create a customer account or sign in to reserve an available room.</p>
-            <a href="register.php" class="btn">Create an Account</a>
+            <h2 class="mb-2.5 font-display text-[clamp(31px,4vw,45px)] text-balance">Your comfortable stay starts here.</h2>
+            <p class="mx-auto mb-[22px] max-w-[620px] text-[#eadfd8]">Create a customer account or sign in to reserve an available room.</p>
+            <a href="register.php" class="<?= $button ?> bg-white text-brown-900">Create an Account</a>
         <?php else: ?>
-            <h2>Administrator Website Preview</h2>
-            <p>Booking is limited to customer accounts. Return to your dashboard to manage the system.</p>
-            <a href="admin/dashboard.php" class="btn">Admin Dashboard</a>
+            <h2 class="mb-2.5 font-display text-[clamp(31px,4vw,45px)] text-balance">Administrator Website Preview</h2>
+            <p class="mx-auto max-w-[620px] text-[#eadfd8]">This is the website as your guests see it. Booking is limited to customer accounts.</p>
         <?php endif; ?>
     </div>
 </section>
 
-<footer>
-    <div class="footer-inner">
+<footer class="bg-brown-900 px-5 pt-[45px] pb-[calc(25px+env(safe-area-inset-bottom,0px))] text-[#d8c9bf] md:px-8 lg:px-10">
+    <div class="mx-auto flex max-w-[1180px] flex-wrap items-center justify-between gap-[30px]">
         <div>
-            <h3>ARVE'S House</h3>
-            <p>Your Home Away From Home</p>
+            <h3 class="font-display text-[22px] text-white">ARVE'S House</h3>
+            <p class="text-[12px] text-[#bdaea5]">Your Home Away From Home</p>
         </div>
 
         <div>
-            <p>Transient & Reservation System</p>
-            <p>Comfort · Relax · Stay</p>
+            <p class="text-[12px] text-[#bdaea5]">Transient & Reservation System</p>
+            <p class="text-[12px] text-[#bdaea5]">Comfort · Relax · Stay</p>
         </div>
     </div>
 
-    <div class="footer-copy">
+    <div class="mx-auto mt-7 max-w-[1180px] border-t border-white/10 pt-5 text-[11px] text-[#a9988e]">
         &copy; <?= date("Y") ?> ARVE'S House. All rights reserved.
     </div>
 </footer>
@@ -1080,6 +640,18 @@ footer p{font-size:12px;color:#bdaea5}
 <script>
 const navLinks = document.getElementById("navLinks");
 const mobileMenuButton = document.getElementById("mobileMenuButton");
+const siteNav = document.querySelector("[data-nav]");
+const lessMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+
+// ======================================================
+// MENU
+// ======================================================
+
+// clear over the picture; solid once the page has scrolled or the phone menu is open
+function paintNav() {
+    siteNav.toggleAttribute("data-solid", window.scrollY > 24 || navLinks.classList.contains("show"));
+}
 
 function setMenu(open) {
     navLinks.classList.toggle("show", open);
@@ -1090,6 +662,8 @@ function setMenu(open) {
         mobileMenuButton.setAttribute("aria-label", open ? "Close menu" : "Open menu");
         mobileMenuButton.innerHTML = open ? <?= json_encode(icon("x")) ?> : <?= json_encode(icon("menu")) ?>;
     }
+
+    paintNav();
 }
 
 function toggleMenu() {
@@ -1107,10 +681,32 @@ document.addEventListener("keydown", event => {
 });
 
 window.addEventListener("resize", () => {
-    if (window.innerWidth > 780) {
+    if (window.innerWidth > 767) {
         setMenu(false);
     }
 });
+
+// the menu and the availability bar both follow the scroll position; once a frame is enough
+let painting = false;
+
+window.addEventListener("scroll", () => {
+    if (!painting) {
+        painting = true;
+
+        requestAnimationFrame(() => {
+            painting = false;
+            paintNav();
+            paintFinder();
+        });
+    }
+}, { passive: true });
+
+paintNav();
+
+
+// ======================================================
+// CHECK-IN AND CHECK-OUT
+// ======================================================
 
 const homeCheckIn = document.getElementById("home_check_in");
 const homeCheckOut = document.getElementById("home_check_out");
@@ -1140,12 +736,170 @@ function updateHomeCheckout() {
 
 homeCheckIn.addEventListener("change", updateHomeCheckout);
 updateHomeCheckout();
+
+// On large screens the bar stays under the menu once it gets there (position: sticky), and
+// then gets a darker glass, because the rooms slide under it instead of the picture.
+const finder = document.querySelector("[data-finder]");
+const finderWrap = document.querySelector("[data-finder-wrap]");
+let finderTop = null;
+
+function measureFinder() {
+    const style = getComputedStyle(finderWrap);
+    finderTop = style.position === "sticky" ? parseFloat(style.top) : null;
+}
+
+function paintFinder() {
+    finder.toggleAttribute("data-stuck", finderTop !== null && finderWrap.getBoundingClientRect().top <= finderTop + 1);
+}
+
+window.addEventListener("resize", () => {
+    measureFinder();
+    paintFinder();
+});
+
+measureFinder();
+paintFinder();
+
+
+// ======================================================
+// THE LARGE PICTURES
+// One replaces the other every few seconds. They stop while the tab is hidden, while the
+// hero is out of view, when the visitor presses pause, and for people who ask for less motion.
+// ======================================================
+
+(function () {
+    const slides = Array.from(document.querySelectorAll("[data-slide]"));
+    const hero = document.querySelector("[data-hero]");
+    const controls = document.querySelector("[data-slide-controls]");
+
+    if (slides.length < 2 || !controls) {
+        return;
+    }
+
+    const SHOW = 7000;      // how long a picture stays
+    const CHANGE = 1750;    // how long the change takes (the longest transition in site.css)
+
+    const dots = Array.from(controls.querySelectorAll("[data-slide-to]"));
+    const pause = controls.querySelector("[data-slide-pause]");
+
+    let current = 0;
+    let timer = 0;
+    let changing = false;
+    let paused = lessMotion.matches;
+    let inView = true;
+
+    controls.style.setProperty("--slide-time", SHOW + "ms");
+
+    // a picture is fetched a moment before its turn, never all at the start
+    function fetchPicture(index) {
+        const image = slides[index].querySelector("img[data-src]");
+
+        if (image) {
+            image.src = image.dataset.src;
+            image.removeAttribute("data-src");
+        }
+    }
+
+    function running() {
+        return !paused && inView && !document.hidden;
+    }
+
+    function plan() {
+        clearTimeout(timer);
+
+        controls.toggleAttribute("data-paused", !running());
+
+        if (running()) {
+            fetchPicture((current + 1) % slides.length);
+            timer = setTimeout(() => show((current + 1) % slides.length), SHOW);
+        }
+    }
+
+    // back = true when the visitor chose an earlier picture: that one comes from the other side
+    function show(next, back = false) {
+        if (changing || next === current) {
+            return;
+        }
+
+        changing = true;
+        clearTimeout(timer);
+        fetchPicture(next);
+
+        const from = slides[current];
+        const to = slides[next];
+
+        dots.forEach((dot, index) => dot.setAttribute("aria-current", index === next ? "true" : "false"));
+
+        to.classList.toggle("is-back", back);
+        to.classList.add("is-entering");
+
+        // two frames, so the browser has drawn the start before it is asked to move
+        requestAnimationFrame(() => requestAnimationFrame(() => to.classList.add("is-in")));
+
+        setTimeout(() => {
+            from.classList.remove("is-current");
+            to.classList.add("is-current");
+            to.classList.remove("is-entering", "is-in", "is-back");
+
+            current = next;
+            changing = false;
+            plan();
+        }, lessMotion.matches ? 450 : CHANGE);
+    }
+
+    dots.forEach((dot, index) => dot.addEventListener("click", () => show(index, index < current)));
+
+    function setPaused(value) {
+        paused = value;
+        pause.setAttribute("aria-pressed", String(paused));
+        pause.setAttribute("aria-label", paused ? "Change the pictures by themselves" : "Stop changing the pictures");
+        pause.querySelector("[data-when-playing]").hidden = paused;
+        pause.querySelector("[data-when-paused]").hidden = !paused;
+        plan();
+    }
+
+    pause.addEventListener("click", () => setPaused(!paused));
+    document.addEventListener("visibilitychange", plan);
+
+    if ("IntersectionObserver" in window) {
+        new IntersectionObserver(([entry]) => {
+            inView = entry.isIntersecting;
+            plan();
+        }, { threshold: 0.15 }).observe(hero);
+    }
+
+    setPaused(paused);
+})();
+
+
+// ======================================================
+// THINGS THAT APPEAR WHEN THEY SCROLL INTO VIEW (once)
+// ======================================================
+
+(function () {
+    const waiting = Array.from(document.querySelectorAll("[data-reveal]"));
+
+    if (!("IntersectionObserver" in window)) {
+        waiting.forEach(element => element.classList.add("is-visible"));
+        return;
+    }
+
+    const watcher = new IntersectionObserver(entries => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting) {
+                entry.target.classList.add("is-visible");
+                watcher.unobserve(entry.target);
+            }
+        });
+    }, { rootMargin: "0px 0px -12% 0px", threshold: 0.12 });
+
+    waiting.forEach(element => watcher.observe(element));
+})();
 </script>
 
 <?php require __DIR__ . "/includes/login-modal.php"; ?>
 
 <?php require __DIR__ . "/includes/inbox-widget.php"; ?>
 <?php require __DIR__ . "/includes/terms-modal.php"; ?>
-
 </body>
 </html>
