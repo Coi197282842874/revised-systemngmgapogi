@@ -21,8 +21,10 @@
  *   reservation.declined  reservation.completed  reservation.confirmed
  *   payment.submitted (cash / pay at property, needs verifying)     payment.verified   payment.rejected
  *   payment.online_paid   payment.online_cancelled
- *   customer.registered   message.received   review.created   review.hidden   review.shown
- *   admin.login   admin.created   admin.role_changed   admin.password_changed
+ *   customer.registered   customer.activated   customer.deactivated
+ *   message.received   message.sent   review.created   review.hidden   review.shown
+ *   admin.login   admin.created   admin.role_changed   admin.permissions_changed
+ *   admin.activated   admin.deactivated   admin.password_changed
  *   room.created  room.updated  room.deleted   dates.closed   dates.opened
  *   settings.updated   backup.downloaded
  */
@@ -107,15 +109,56 @@ function log_activity(PDO $pdo, string $type, string $summary, array $options = 
 
 /*
  * Latest events, newest first. Filters (all optional):
- *   type_prefix ("payment." or "reservation."), actor_role, notify (bool), unread (bool),
- *   search (text in the summary or the actor's name), before_id (for "older" paging)
+ *   type_prefix ("payment." or "reservation."), actor_role, not_actor_role, notify (bool), unread (bool),
+ *   search (text in the summary or the actor's name), before_id (for "older" paging),
+ *   since, until (UTC "Y-m-d H:i:s": from since, up to but not including until)
  */
 function activity_recent(PDO $pdo, int $limit = 20, array $filters = []): array
 {
     ensure_activity_schema($pdo);
 
+    [$where, $values] = activity_where($filters);
+
+    $stmt = $pdo->prepare(
+        "SELECT * FROM activity_log"
+        . ($where ? " WHERE " . implode(" AND ", $where) : "")
+        . " ORDER BY id DESC LIMIT " . max(1, min(5000, $limit))
+    );
+    $stmt->execute($values);
+
+    return $stmt->fetchAll();
+}
+
+// How many events match the same filters as activity_recent().
+function activity_count(PDO $pdo, array $filters = []): int
+{
+    ensure_activity_schema($pdo);
+
+    [$where, $values] = activity_where($filters);
+
+    $stmt = $pdo->prepare(
+        "SELECT COUNT(*) FROM activity_log" . ($where ? " WHERE " . implode(" AND ", $where) : "")
+    );
+    $stmt->execute($values);
+
+    return (int) $stmt->fetchColumn();
+}
+
+// The filters of activity_recent() as SQL conditions and their values.
+function activity_where(array $filters): array
+{
     $where = [];
     $values = [];
+
+    if (!empty($filters["since"])) {
+        $where[] = "created_at >= ?";
+        $values[] = (string) $filters["since"];
+    }
+
+    if (!empty($filters["until"])) {
+        $where[] = "created_at < ?";
+        $values[] = (string) $filters["until"];
+    }
 
     if (!empty($filters["type_prefix"])) {
         $where[] = "type LIKE ?";
@@ -125,6 +168,11 @@ function activity_recent(PDO $pdo, int $limit = 20, array $filters = []): array
     if (!empty($filters["actor_role"])) {
         $where[] = "actor_role = ?";
         $values[] = (string) $filters["actor_role"];
+    }
+
+    if (!empty($filters["not_actor_role"])) {
+        $where[] = "actor_role <> ?";
+        $values[] = (string) $filters["not_actor_role"];
     }
 
     if (array_key_exists("notify", $filters)) {
@@ -148,14 +196,7 @@ function activity_recent(PDO $pdo, int $limit = 20, array $filters = []): array
         $values[] = (int) $filters["before_id"];
     }
 
-    $stmt = $pdo->prepare(
-        "SELECT * FROM activity_log"
-        . ($where ? " WHERE " . implode(" AND ", $where) : "")
-        . " ORDER BY id DESC LIMIT " . max(1, min(200, $limit))
-    );
-    $stmt->execute($values);
-
-    return $stmt->fetchAll();
+    return [$where, $values];
 }
 
 function admin_notifications(PDO $pdo, int $limit = 8, bool $unreadOnly = false): array
@@ -273,3 +314,194 @@ function activity_time(string $utc, string $format = "M j, Y · g:i A"): string
 
     return $date->format($format);
 }
+
+/*
+ * Fills an empty log with what already happened (customers, bookings, payments), so the
+ * dashboard has a history from the first day. Bookings and payments become notifications
+ * that are already read. Runs once: as soon as the log has a row it does nothing.
+ */
+function activity_backfill(PDO $pdo): void
+{
+    static $done = false;
+
+    if ($done) {
+        return;
+    }
+
+    $done = true;
+
+    try {
+        ensure_activity_schema($pdo);
+
+        if ($pdo->query("SELECT 1 FROM activity_log LIMIT 1")->fetchColumn()) {
+            return;
+        }
+
+        // two admins opening the panel at the same moment must not fill it twice
+        if (!$pdo->query("SELECT GET_LOCK('arves_activity_backfill', 0)")->fetchColumn()) {
+            return;
+        }
+
+        try {
+            if ($pdo->query("SELECT 1 FROM activity_log LIMIT 1")->fetchColumn()) {
+                return;
+            }
+
+            $events = [];
+
+            $customers = $pdo->query(
+                "SELECT id, full_name, created_at FROM users WHERE role = 'customer'"
+            );
+
+            foreach ($customers as $row) {
+                $events[] = [
+                    "at" => strtotime($row["created_at"]),
+                    "actor_id" => (int) $row["id"],
+                    "actor_name" => $row["full_name"],
+                    "type" => "customer.registered",
+                    "summary" => $row["full_name"] . " created an account",
+                    "entity_type" => "customer",
+                    "entity_id" => (int) $row["id"],
+                    "link" => "customers.php",
+                    "notify" => 0,
+                ];
+            }
+
+            $reservations = $pdo->query(
+                "SELECT reservations.id, reservations.user_id, reservations.check_in, reservations.check_out,
+                        reservations.created_at, rooms.room_name, users.full_name
+                 FROM reservations
+                 INNER JOIN rooms ON rooms.id = reservations.room_id
+                 INNER JOIN users ON users.id = reservations.user_id"
+            );
+
+            foreach ($reservations as $row) {
+                $events[] = [
+                    "at" => strtotime($row["created_at"]),
+                    "actor_id" => (int) $row["user_id"],
+                    "actor_name" => $row["full_name"],
+                    "type" => "reservation.created",
+                    "summary" => $row["full_name"] . " booked " . $row["room_name"] . ", "
+                        . date("M j", strtotime($row["check_in"])) . " to " . date("M j", strtotime($row["check_out"])),
+                    "entity_type" => "reservation",
+                    "entity_id" => (int) $row["id"],
+                    "link" => "reservations.php",
+                    "notify" => 1,
+                ];
+            }
+
+            $payments = $pdo->query(
+                "SELECT payments.id, payments.user_id, payments.reservation_id, payments.amount,
+                        payments.payment_method, payments.status, payments.created_at, users.full_name
+                 FROM payments
+                 INNER JOIN users ON users.id = payments.user_id
+                 WHERE payments.status IN ('pending', 'verified', 'rejected')"
+            );
+
+            foreach ($payments as $row) {
+                $online = str_starts_with((string) $row["payment_method"], "online");
+
+                if ($online && $row["status"] !== "verified") {
+                    continue;
+                }
+
+                $method = ucwords(str_replace(["online_", "_"], ["", " "], (string) $row["payment_method"]));
+
+                $events[] = [
+                    "at" => strtotime($row["created_at"]),
+                    "actor_id" => (int) $row["user_id"],
+                    "actor_name" => $row["full_name"],
+                    "type" => $online ? "payment.online_paid" : "payment.submitted",
+                    "summary" => $row["full_name"] . ($online ? " paid " : " sent a payment of ")
+                        . "₱" . number_format((float) $row["amount"], 2) . " (" . $method . ") for reservation #"
+                        . (int) $row["reservation_id"],
+                    "entity_type" => "payment",
+                    "entity_id" => (int) $row["id"],
+                    "link" => "payment.php",
+                    "notify" => 1,
+                ];
+            }
+
+            usort($events, fn ($a, $b) => $a["at"] <=> $b["at"]);
+
+            $insert = $pdo->prepare(
+                "INSERT INTO activity_log
+                    (created_at, actor_id, actor_role, actor_name, type, summary, entity_type, entity_id, link, notify, read_at)
+                 VALUES (?, ?, 'customer', ?, ?, ?, ?, ?, ?, ?, ?)"
+            );
+
+            foreach ($events as $event) {
+                $at = gmdate("Y-m-d H:i:s", $event["at"] ?: time());
+
+                $insert->execute([
+                    $at,
+                    $event["actor_id"],
+                    mb_substr((string) $event["actor_name"], 0, 150),
+                    $event["type"],
+                    mb_substr($event["summary"], 0, 255),
+                    $event["entity_type"],
+                    $event["entity_id"],
+                    $event["link"],
+                    $event["notify"],
+                    $event["notify"] ? $at : null,
+                ]);
+            }
+        } finally {
+            $pdo->query("SELECT RELEASE_LOCK('arves_activity_backfill')");
+        }
+    } catch (Throwable $e) {
+        error_log("ARVE'S House activity backfill failed: " . $e->getMessage());
+    }
+}
+
+// Short name of an event type for tables and filters: "payment.verified" → "Payment verified".
+function activity_label(string $type): string
+{
+    $labels = [
+        "reservation.created" => "New reservation",
+        "reservation.confirmed" => "Reservation confirmed",
+        "reservation.completed" => "Stay completed",
+        "reservation.cancelled" => "Reservation cancelled",
+        "reservation.declined" => "Reservation declined",
+        "reservation.expired" => "Reservation expired",
+        "payment.submitted" => "Payment sent",
+        "payment.verified" => "Payment verified",
+        "payment.rejected" => "Payment rejected",
+        "payment.online_paid" => "Online payment",
+        "payment.online_cancelled" => "Online payment cancelled",
+        "customer.registered" => "New customer",
+        "customer.activated" => "Customer turned on",
+        "customer.deactivated" => "Customer turned off",
+        "message.received" => "New message",
+        "message.sent" => "Reply sent",
+        "admin.login" => "Admin login",
+        "admin.created" => "Admin added",
+        "admin.role_changed" => "Role changed",
+        "admin.permissions_changed" => "Permissions changed",
+        "admin.activated" => "Admin turned on",
+        "admin.deactivated" => "Admin turned off",
+        "admin.password_changed" => "Password changed",
+        "room.created" => "Room added",
+        "room.updated" => "Room edited",
+        "room.deleted" => "Room deleted",
+        "dates.closed" => "Dates closed",
+        "dates.opened" => "Dates opened",
+        "settings.updated" => "Settings changed",
+        "backup.downloaded" => "Backup downloaded",
+    ];
+
+    return $labels[$type] ?? ucfirst(str_replace([".", "_"], " ", $type));
+}
+
+// The groups of event types, for filters: "payment." => "Payments"
+const ACTIVITY_GROUPS = [
+    "reservation." => "Reservations",
+    "payment." => "Payments",
+    "customer." => "Customers",
+    "message." => "Messages",
+    "room." => "Rooms",
+    "dates." => "Calendar",
+    "admin." => "Admins",
+    "settings." => "Settings",
+    "backup." => "Backups",
+];

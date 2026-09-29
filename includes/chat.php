@@ -140,20 +140,88 @@ function chat_send(PDO $pdo, int $customerId, string $sender, int $senderId, str
     }
 
     $now = utc_now();
+    $firstOfItsKind = chat_starts_a_turn($pdo, $customerId, $sender);
 
     $pdo->prepare(
         "INSERT INTO chat_messages (customer_id, sender, sender_id, body, created_at)
          VALUES (?, ?, ?, ?, ?)"
     )->execute([$customerId, $sender, $senderId, $body, $now]);
 
+    $messageId = $pdo->lastInsertId();
+
+    if ($firstOfItsKind) {
+        chat_log($pdo, $customerId, $sender);
+    }
+
     return [
         "ok" => true,
         "message" => chat_message_out([
-            "id" => $pdo->lastInsertId(),
+            "id" => $messageId,
             "sender" => $sender,
             "body" => $body,
             "created_at" => $now,
             "read_at" => null,
         ]),
     ];
+}
+
+/*
+ * Several messages in a row count as one turn. True when this message starts a turn:
+ * for a customer, when none of their messages is still waiting to be read by an admin;
+ * for an admin, when the last message of the conversation is not already an admin's.
+ */
+function chat_starts_a_turn(PDO $pdo, int $customerId, string $sender): bool
+{
+    try {
+        if ($sender === "customer") {
+            $stmt = $pdo->prepare(
+                "SELECT COUNT(*) FROM chat_messages
+                 WHERE customer_id = ? AND sender = 'customer' AND read_at IS NULL"
+            );
+            $stmt->execute([$customerId]);
+
+            return (int) $stmt->fetchColumn() === 0;
+        }
+
+        $stmt = $pdo->prepare("SELECT sender FROM chat_messages WHERE customer_id = ? ORDER BY id DESC LIMIT 1");
+        $stmt->execute([$customerId]);
+
+        return $stmt->fetchColumn() !== "admin";
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+/*
+ * Writes the start of a turn into the activity log (includes/activity.php). A customer's
+ * message also becomes a notification for the admins: one per turn, not one per message.
+ */
+function chat_log(PDO $pdo, int $customerId, string $sender): void
+{
+    try {
+        require_once __DIR__ . "/activity.php";
+
+        $stmt = $pdo->prepare("SELECT full_name FROM users WHERE id = ?");
+        $stmt->execute([$customerId]);
+        $name = (string) ($stmt->fetchColumn() ?: "A customer");
+
+        $about = [
+            "entity_type" => "customer",
+            "entity_id" => $customerId,
+            "link" => "messages.php?customer=" . $customerId,
+        ];
+
+        if ($sender === "customer") {
+            log_activity($pdo, "message.received", $name . " sent a message", $about + [
+                "actor_id" => $customerId,
+                "actor_role" => "customer",
+                "actor_name" => $name,
+                "notify" => true,
+            ]);
+        } else {
+            log_activity($pdo, "message.sent", "Replied to " . $name, $about);
+        }
+    } catch (Throwable $e) {
+        error_log("ARVE'S House message log failed: " . $e->getMessage());
+    }
 }

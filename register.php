@@ -4,6 +4,7 @@ session_start();
 
 require_once __DIR__ . "/config/database.php";
 require_once __DIR__ . "/includes/auth.php";
+require_once __DIR__ . "/includes/activity.php";
 
 ensure_auth_schema($pdo);
 
@@ -97,6 +98,16 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 "full_name" => $fullName,
                 "email" => $email,
             ];
+
+            log_activity($pdo, "customer.registered", $fullName . " created an account", [
+                "actor_id" => $newUser["id"],
+                "actor_role" => "customer",
+                "actor_name" => $fullName,
+                "entity_type" => "customer",
+                "entity_id" => $newUser["id"],
+                "link" => "customers.php?q=" . str_replace("~", "%7E", rawurlencode($email)),
+                "notify" => true,
+            ]);
 
 
             // Email a 6-digit code and continue on the verification page

@@ -1,871 +1,825 @@
 <?php
-
 session_start();
 
 require_once __DIR__ . "/../config/database.php";
+require_once __DIR__ . "/../includes/admin-shell.php";
+require_once __DIR__ . "/../includes/photos.php";
 
-// Only admins can access this page
-if (!isset($_SESSION["user_id"]) || $_SESSION["role"] !== "admin") {
-    header("Location: login.php");
-    exit;
+$admin = admin_boot($pdo, "rooms");
+
+/*
+ * Photos of a room are files, not database rows: uploads/rooms/room_<id>_<1 to 6>.jpg
+ * (the public rooms page and the booking page look for exactly these names).
+ * includes/photos.php does the work; these are the room's names for it.
+ */
+const ROOM_PHOTO_SLOTS = PHOTO_SLOTS;
+
+const ROOM_STATUSES = [
+    "available" => "Available: guests can book it",
+    "maintenance" => "Maintenance: closed for repairs, hidden from guests",
+    "inactive" => "Inactive: no longer offered, hidden from guests",
+];
+
+function room_photo_path(int $roomId, int $slot): string
+{
+    return photo_file("rooms/room_" . $roomId, $slot);
 }
 
-$message = "";
-$messageType = "";
+// slot => address of the photo, as seen from an admin page
+function room_photos(int $roomId): array
+{
+    return photo_list("rooms/room_" . $roomId, "../");
+}
 
-// ADD ROOM
-if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["add_room"])) {
+function room_photo_save(array $file, int $roomId, int $slot): string
+{
+    return photo_save($file, "rooms/room_" . $roomId, $slot);
+}
 
-    $roomName = trim($_POST["room_name"] ?? "");
-    $description = trim($_POST["description"] ?? "");
-    $capacity = (int) ($_POST["capacity"] ?? 0);
-    $price = (float) ($_POST["price"] ?? 0);
-    $status = $_POST["status"] ?? "available";
-
-    $allowedStatuses = [
-        "available",
-        "maintenance",
-        "inactive"
+// What the add and edit forms send, checked. Returns [values, error].
+function room_form_values(): array
+{
+    $values = [
+        "room_name" => mb_substr(trim((string) ($_POST["room_name"] ?? "")), 0, 150),
+        "description" => trim((string) ($_POST["description"] ?? "")),
+        "capacity" => (int) ($_POST["capacity"] ?? 0),
+        "price" => (float) ($_POST["price"] ?? 0),
+        "status" => (string) ($_POST["status"] ?? "available"),
     ];
 
-    if (
-        empty($roomName) ||
-        $capacity < 1 ||
-        $price < 0 ||
-        !in_array($status, $allowedStatuses, true)
-    ) {
+    $error = "";
 
-        $message = "Please enter valid room information.";
-        $messageType = "error";
+    if ($values["room_name"] === "") {
+        $error = "Please enter the room's name.";
+    } elseif ($values["capacity"] < 1 || $values["capacity"] > 100) {
+        $error = "The number of guests must be between 1 and 100.";
+    } elseif ($values["price"] < 0 || $values["price"] > 9999999) {
+        $error = "Please enter a valid price per night.";
+    } elseif (!isset(ROOM_STATUSES[$values["status"]])) {
+        $error = "Please choose a status from the list.";
+    }
+
+    return [$values, $error];
+}
+
+
+// ======================================================
+// FILTER: ?q= (room name or description)
+// ======================================================
+
+$search = admin_query();
+$here = admin_url("rooms.php", ["q" => $search]);
+
+// a form that failed is shown again, open, with what was typed
+$openDialog = "";
+$formError = "";
+$formValues = [];
+
+
+// ======================================================
+// ADD, EDIT, DELETE, PHOTOS
+// ======================================================
+
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
+
+    $action = (string) ($_POST["action"] ?? "");
+    $roomId = (int) ($_POST["room_id"] ?? 0);
+
+    $room = null;
+
+    if ($roomId > 0) {
+        $stmt = $pdo->prepare("SELECT * FROM rooms WHERE id = ? LIMIT 1");
+        $stmt->execute([$roomId]);
+        $room = $stmt->fetch() ?: null;
+    }
+
+    $done = false;
+
+    // a request larger than the server accepts arrives with nothing in it
+    if (!$_POST && (int) ($_SERVER["CONTENT_LENGTH"] ?? 0) > 0) {
+        admin_flash("Those photos are too large to upload in one go. Try fewer or smaller photos.", "error");
+        $done = true;
+
+    } elseif (!admin_check_csrf()) {
+        admin_flash("Your session expired. Please try again.", "error");
+        $done = true;
+
+    } elseif ($action === "add") {
+
+        [$formValues, $formError] = room_form_values();
+
+        if ($formError === "") {
+            $pdo->prepare(
+                "INSERT INTO rooms (room_name, description, capacity, price, status) VALUES (?, ?, ?, ?, ?)"
+            )->execute(array_values($formValues));
+
+            $newId = (int) $pdo->lastInsertId();
+
+            log_activity($pdo, "room.created", "Added room " . $formValues["room_name"], [
+                "entity_type" => "room",
+                "entity_id" => $newId,
+                "link" => "rooms.php?q=" . rawurlencode($formValues["room_name"]),
+            ]);
+
+            admin_flash("Room “" . $formValues["room_name"] . "” was added. You can add its photos now.");
+            $done = true;
+        } else {
+            $openDialog = "room-add";
+        }
+
+    } elseif ($room && $action === "edit") {
+
+        [$formValues, $formError] = room_form_values();
+
+        if ($formError === "") {
+            $pdo->prepare(
+                "UPDATE rooms SET room_name = ?, description = ?, capacity = ?, price = ?, status = ? WHERE id = ?"
+            )->execute(array_merge(array_values($formValues), [$roomId]));
+
+            log_activity($pdo, "room.updated", "Edited room " . $formValues["room_name"], [
+                "entity_type" => "room",
+                "entity_id" => $roomId,
+                "link" => "rooms.php?q=" . rawurlencode($formValues["room_name"]),
+            ]);
+
+            admin_flash("Room “" . $formValues["room_name"] . "” was saved.");
+            $done = true;
+        } else {
+            $openDialog = "room-edit-" . $roomId;
+        }
+
+    } elseif ($room && $action === "delete") {
+
+        try {
+            $pdo->prepare("DELETE FROM rooms WHERE id = ?")->execute([$roomId]);
+
+            for ($slot = 1; $slot <= ROOM_PHOTO_SLOTS; $slot++) {
+                if (is_file(room_photo_path($roomId, $slot))) {
+                    @unlink(room_photo_path($roomId, $slot));
+                }
+            }
+
+            log_activity($pdo, "room.deleted", "Deleted room " . $room["room_name"], [
+                "entity_type" => "room",
+                "entity_id" => $roomId,
+            ]);
+
+            admin_flash("Room “" . $room["room_name"] . "” was deleted.");
+        } catch (PDOException $e) {
+            admin_flash(
+                "“" . $room["room_name"] . "” cannot be deleted because it has reservations. "
+                    . "Set its status to Inactive to hide it from guests instead.",
+                "error"
+            );
+        }
+
+        $done = true;
+
+    } elseif ($room && $action === "photos_add") {
+
+        $files = $_FILES["photos"] ?? null;
+        $free = array_values(array_diff(range(1, ROOM_PHOTO_SLOTS), array_keys(room_photos($roomId))));
+        $saved = 0;
+        $problems = [];
+
+        if ($files && is_array($files["name"])) {
+            foreach ($files["name"] as $index => $name) {
+                if ($files["error"][$index] === UPLOAD_ERR_NO_FILE) {
+                    continue;
+                }
+
+                if (!$free) {
+                    $problems[] = "A room holds " . ROOM_PHOTO_SLOTS . " photos. Remove one to add another.";
+                    break;
+                }
+
+                $problem = room_photo_save([
+                    "name" => $name,
+                    "tmp_name" => $files["tmp_name"][$index],
+                    "error" => $files["error"][$index],
+                    "size" => $files["size"][$index],
+                ], $roomId, $free[0]);
+
+                if ($problem === "") {
+                    array_shift($free);
+                    $saved++;
+                } else {
+                    $problems[] = $problem;
+                }
+            }
+        }
+
+        if ($saved > 0) {
+            log_activity($pdo, "room.updated", "Added " . $saved . ($saved === 1 ? " photo" : " photos") . " to room " . $room["room_name"], [
+                "entity_type" => "room",
+                "entity_id" => $roomId,
+                "link" => "rooms.php?q=" . rawurlencode($room["room_name"]),
+            ]);
+
+            admin_flash($saved . ($saved === 1 ? " photo" : " photos") . " added to “" . $room["room_name"] . "”.");
+        }
+
+        if ($problems) {
+            admin_flash(implode(" ", array_unique($problems)), "error");
+        } elseif ($saved === 0) {
+            admin_flash("Choose one or more photos first.", "error");
+        }
+
+        header("Location: " . admin_url("rooms.php", ["q" => $search, "photos" => $roomId]));
+        exit;
+
+    } elseif ($room && $action === "photo_remove") {
+
+        $slot = (int) ($_POST["slot"] ?? 0);
+
+        if ($slot >= 1 && $slot <= ROOM_PHOTO_SLOTS && is_file(room_photo_path($roomId, $slot))) {
+            @unlink(room_photo_path($roomId, $slot));
+
+            // close the gap, so the first photo (the one guests see first) is never missing
+            $rest = array_keys(room_photos($roomId));
+
+            foreach (array_values($rest) as $index => $from) {
+                if ($from !== $index + 1) {
+                    @rename(room_photo_path($roomId, $from), room_photo_path($roomId, $index + 1));
+                }
+            }
+
+            log_activity($pdo, "room.updated", "Removed a photo from room " . $room["room_name"], [
+                "entity_type" => "room",
+                "entity_id" => $roomId,
+                "link" => "rooms.php?q=" . rawurlencode($room["room_name"]),
+            ]);
+
+            admin_flash("Photo removed.");
+        }
+
+        header("Location: " . admin_url("rooms.php", ["q" => $search, "photos" => $roomId]));
+        exit;
+
+    } elseif ($room && $action === "photo_first") {
+
+        // the chosen photo changes places with the first one
+        $slot = (int) ($_POST["slot"] ?? 0);
+
+        if ($slot > 1 && $slot <= ROOM_PHOTO_SLOTS && is_file(room_photo_path($roomId, $slot)) && is_file(room_photo_path($roomId, 1))) {
+            $spare = room_photo_path($roomId, 1) . ".swap";
+
+            @rename(room_photo_path($roomId, 1), $spare);
+            @rename(room_photo_path($roomId, $slot), room_photo_path($roomId, 1));
+            @rename($spare, room_photo_path($roomId, $slot));
+            @touch(room_photo_path($roomId, 1));
+            @touch(room_photo_path($roomId, $slot));
+
+            admin_flash("That photo is now the first one guests see.");
+        }
+
+        header("Location: " . admin_url("rooms.php", ["q" => $search, "photos" => $roomId]));
+        exit;
 
     } else {
+        admin_flash("That room no longer exists.", "error");
+        $done = true;
+    }
 
-        $stmt = $pdo->prepare(
-            "INSERT INTO rooms
-            (room_name, description, capacity, price, status)
-            VALUES (?, ?, ?, ?, ?)"
-        );
-
-        $stmt->execute([
-            $roomName,
-            $description,
-            $capacity,
-            $price,
-            $status
-        ]);
-
-        $message = "Room added successfully.";
-        $messageType = "success";
+    if ($done) {
+        header("Location: " . $here);
+        exit;
     }
 }
 
-
-// DELETE ROOM
-if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["delete_room"])) {
-
-    $roomId = (int) $_POST["room_id"];
-
-    try {
-
-        $stmt = $pdo->prepare(
-            "DELETE FROM rooms WHERE id = ?"
-        );
-
-        $stmt->execute([$roomId]);
-
-        $message = "Room deleted successfully.";
-        $messageType = "success";
-
-    } catch (PDOException $e) {
-
-        $message = "This room cannot be deleted because it has reservation records.";
-        $messageType = "error";
-    }
+// after a photo was added or removed, the photos window of that room opens again
+if ($openDialog === "" && isset($_GET["photos"])) {
+    $openDialog = "room-photos-" . (int) $_GET["photos"];
 }
 
 
-// GET ROOMS
-$rooms = $pdo
-    ->query(
-        "SELECT *
-         FROM rooms
-         ORDER BY id DESC"
-    )
-    ->fetchAll();
+// ======================================================
+// THE ROOMS
+// ======================================================
 
+$counts = ["all" => 0, "available" => 0, "maintenance" => 0, "inactive" => 0];
+$priceSum = 0.0;
+
+foreach ($pdo->query("SELECT status, COUNT(*) AS total, SUM(price) AS prices FROM rooms GROUP BY status") as $row) {
+    if (isset($counts[$row["status"]])) {
+        $counts[$row["status"]] = (int) $row["total"];
+    }
+
+    $counts["all"] += (int) $row["total"];
+    $priceSum += (float) $row["prices"];
+}
+
+$sql = "
+    SELECT
+        rooms.*,
+        (
+            SELECT COUNT(*) FROM reservations
+            WHERE reservations.room_id = rooms.id
+        ) AS reservations,
+        (
+            SELECT COUNT(*) FROM reservations
+            WHERE reservations.room_id = rooms.id
+            AND reservations.status IN ('pending', 'confirmed')
+            AND reservations.check_out > CURDATE()
+        ) AS upcoming
+    FROM rooms
+";
+
+$params = [];
+
+if ($search !== "") {
+    $sql .= " WHERE rooms.room_name LIKE ? OR rooms.description LIKE ?";
+    $params = [admin_like($search), admin_like($search)];
+}
+
+$stmt = $pdo->prepare($sql . " ORDER BY rooms.status = 'available' DESC, rooms.room_name");
+$stmt->execute($params);
+$rooms = $stmt->fetchAll();
+
+// the add / edit form, used in several windows
+$roomForm = function (string $prefix, array $values) {
+    ?>
+    <div class="form-grid">
+        <label class="field field-wide">
+            <span class="label">Room name</span>
+            <input class="input" type="text" name="room_name" value="<?= h($values["room_name"] ?? "") ?>" placeholder="Example: Family Room" maxlength="150" required>
+        </label>
+
+        <label class="field">
+            <span class="label">Guests it holds</span>
+            <input class="input" type="number" name="capacity" value="<?= h($values["capacity"] ?? "") ?>" inputmode="numeric" min="1" max="100" placeholder="Example: 4" required>
+        </label>
+
+        <label class="field">
+            <span class="label">Price per night (₱)</span>
+            <input class="input" type="number" name="price" value="<?= h($values["price"] ?? "") ?>" inputmode="decimal" min="0" step="0.01" placeholder="Example: 1500" required>
+        </label>
+
+        <label class="field field-wide">
+            <span class="label">Status</span>
+            <select class="select" name="status">
+                <?php foreach (ROOM_STATUSES as $status => $label): ?>
+                    <option value="<?= h($status) ?>" <?= ($values["status"] ?? "available") === $status ? "selected" : "" ?>><?= h($label) ?></option>
+                <?php endforeach; ?>
+            </select>
+        </label>
+
+        <label class="field field-wide">
+            <span class="label">Description</span>
+            <textarea class="textarea" name="description" placeholder="Beds, air conditioning, bathroom, what is included…"><?= h($values["description"] ?? "") ?></textarea>
+        </label>
+    </div>
+    <?php
+};
+
+admin_shell_head([
+    "title" => "Rooms",
+    "subtitle" => "The rooms guests can book, their prices and photos",
+    "active" => "rooms",
+]);
 ?>
+<style>
+    .rooms {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        gap: 20px;
+    }
 
-<!DOCTYPE html>
-<html lang="en">
+    .room {
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
 
-<head>
+    .room-photo {
+        position: relative;
+        aspect-ratio: 16 / 10;
+        background: var(--surface-3);
+    }
 
-    <meta charset="UTF-8">
+    .room-photo img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+    }
 
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0, viewport-fit=cover"
-    >
+    .room-photo-none {
+        display: grid;
+        place-items: center;
+        align-content: center;
+        gap: 6px;
+        height: 100%;
+        color: var(--text-3);
+        font-size: 12.5px;
+    }
 
-    <meta
-        name="theme-color"
-        content="#211914"
-    >
+    .room-photo .pill {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        background: var(--surface);
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+    }
 
-    <title>Manage Rooms | ARVE'S House</title>
+    .room-photo-count {
+        position: absolute;
+        right: 12px;
+        bottom: 12px;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: rgba(0, 0, 0, 0.62);
+        color: #fff;
+        font-size: 11.5px;
+        font-weight: 600;
+    }
 
-    <style>
+    .room-body {
+        display: flex;
+        flex: 1;
+        flex-direction: column;
+        gap: 10px;
+        padding: 16px 18px 18px;
+    }
 
-        :root {
-            /* motion tokens (Emil Kowalski curves) */
-            --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
-            --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
-            --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+    .room-title {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+    }
+
+    .room-title h2 {
+        min-width: 0;
+        font-size: 16px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+        overflow-wrap: anywhere;
+    }
+
+    .room-price {
+        flex: none;
+        font-size: 15px;
+        font-weight: 700;
+        white-space: nowrap;
+    }
+
+    .room-price span {
+        color: var(--text-3);
+        font-size: 12px;
+        font-weight: 400;
+    }
+
+    .room-text {
+        display: -webkit-box;
+        overflow: hidden;
+        color: var(--text-2);
+        font-size: 13px;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 3;
+        line-clamp: 3;
+    }
+
+    .room-facts {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 14px;
+        color: var(--text-3);
+        font-size: 12.5px;
+    }
+
+    .room-facts span {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+    }
+
+    .room-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: auto;
+        padding-top: 6px;
+    }
+
+    .room-actions .btn {
+        flex: 1 1 auto;
+    }
+
+    @media (max-width: 767px) {
+        .rooms {
+            grid-template-columns: minmax(0, 1fr);
+            gap: 14px;
         }
-
-        * {
-            box-sizing: border-box;
-        }
-
-        html {
-            -webkit-tap-highlight-color: transparent;
-
-            -webkit-text-size-adjust: 100%;
-
-            text-size-adjust: 100%;
-        }
-
-        /* controls: no double-tap zoom delay, no long-press text selection */
-        button,
-        .button,
-        .delete-button {
-            touch-action: manipulation;
-
-            -webkit-user-select: none;
-
-            user-select: none;
-        }
-
-        body {
-            margin: 0;
-
-            font-family: Arial, sans-serif;
-
-            background: #f5f2ed;
-
-            color: #333;
-        }
-
-        .navbar {
-            min-height: 70px;
-
-            min-height: calc(70px + env(safe-area-inset-top, 0px));
-
-            background: #211914;
-
-            color: white;
-
-            display: flex;
-
-            align-items: center;
-
-            justify-content: space-between;
-
-            padding: 0 30px;
-
-            /* viewport-fit=cover: keep bar content clear of the notch / status bar */
-            padding-top: env(safe-area-inset-top, 0px);
-
-            padding-left: max(30px, env(safe-area-inset-left, 0px));
-
-            padding-right: max(30px, env(safe-area-inset-right, 0px));
-        }
-
-        .brand {
-            font-size: 21px;
-            font-weight: bold;
-        }
-
-        .nav-links {
-            display: flex;
-            gap: 10px;
-        }
-
-        .nav-links a {
-            color: white;
-
-            text-decoration: none;
-
-            padding: 9px 14px;
-
-            border-radius: 7px;
-
-            touch-action: manipulation;
-
-            transition:
-                transform 140ms var(--ease-out),
-                background-color 180ms ease;
-        }
-
-        @media (hover: hover) and (pointer: fine) {
-
-            .nav-links a:hover {
-                background: rgba(255,255,255,.1);
-            }
-
-        }
-
-        .nav-links a:focus-visible {
-            background: rgba(255,255,255,.1);
-        }
-
-        .nav-links a:active {
-            transform: scale(0.97);
-        }
-
-        .container {
-            max-width: 1200px;
-
-            margin: 35px auto;
-
-            padding: 0 20px;
-
-            padding-left: max(20px, env(safe-area-inset-left, 0px));
-
-            padding-right: max(20px, env(safe-area-inset-right, 0px));
-        }
-
-        .header {
-            margin-bottom: 25px;
-        }
-
-        .header h1 {
-            margin-bottom: 5px;
-        }
-
-        .header p {
-            color: #777;
-        }
-
-        .form-card,
-        .rooms-card {
-            background: white;
-
-            border-radius: 14px;
-
-            padding: 25px;
-
-            margin-bottom: 25px;
-
-            box-shadow:
-                0 5px 20px rgba(0,0,0,.07);
-        }
-
-        .form-card h2,
-        .rooms-card h2 {
-            margin-top: 0;
-
-            color: #4b3025;
-        }
-
-        .form-grid {
-            display: grid;
-
-            grid-template-columns:
-                repeat(2, 1fr);
-
-            gap: 18px;
-        }
-
-        .form-group {
-            margin-bottom: 5px;
-        }
-
-        .full {
-            grid-column: 1 / -1;
-        }
-
-        label {
-            display: block;
-
-            margin-bottom: 7px;
-
-            font-weight: bold;
-        }
-
-        input,
-        textarea,
-        select {
-            width: 100%;
-
-            padding: 12px;
-
-            border: 1px solid #ccc;
-
-            border-radius: 8px;
-
-            font-size: 15px;
-
-            outline: none;
-        }
-
-        /* touch screens: 16px stops iOS zooming into the field (desktop keeps 15px) */
-        @media (pointer: coarse) {
-
-            input,
-            textarea,
-            select {
-                font-size: 16px;
-            }
-
-        }
-
-        textarea {
-            min-height: 100px;
-
-            resize: vertical;
-        }
-
-        input:focus,
-        textarea:focus,
-        select:focus {
-            border-color: #8b5e3c;
-        }
-
-        .button {
-            border: none;
-
-            padding: 12px 20px;
-
-            border-radius: 8px;
-
-            background: #6f4e37;
-
-            color: white;
-
-            font-size: 15px;
-
-            font-weight: bold;
-
-            cursor: pointer;
-
-            transition:
-                transform 140ms var(--ease-out),
-                background-color 180ms ease;
-        }
-
-        @media (hover: hover) and (pointer: fine) {
-
-            .button:hover {
-                background: #563a29;
-            }
-
-        }
-
-        .button:focus-visible {
-            background: #563a29;
-        }
-
-        .button:active:not(:disabled) {
-            transform: scale(0.97);
-        }
-
-        .message {
-            padding: 13px;
-
-            border-radius: 8px;
-
-            margin-bottom: 20px;
-
-            /* one-time entrance: result of the add/delete POST draws the eye */
-            animation: message-in 240ms var(--ease-out) both;
-        }
-
-        @keyframes message-in {
-            from {
-                opacity: 0;
-
-                transform: translateY(-4px);
-            }
-        }
-
-        @keyframes message-fade {
-            from {
-                opacity: 0;
-            }
-        }
-
-        .message.success {
-            background: #e4f6e8;
-
-            color: #167532;
-        }
-
-        .message.error {
-            background: #ffe5e5;
-
-            color: #b00020;
-        }
-
-        .table-wrapper {
-            overflow-x: auto;
-
-            /* sideways table swipe must not trigger browser back/forward */
-            overscroll-behavior-x: contain;
-        }
-
-        table {
-            width: 100%;
-
-            border-collapse: collapse;
-        }
-
-        th,
-        td {
-            padding: 14px;
-
-            border-bottom: 1px solid #eee;
-
-            text-align: left;
-        }
-
-        th {
-            background: #f8f5f1;
-
-            color: #4b3025;
-        }
-
-        .status {
-            display: inline-block;
-
-            padding: 5px 10px;
-
-            border-radius: 20px;
-
-            font-size: 12px;
-
-            font-weight: bold;
-        }
-
-        .available {
-            background: #e4f6e8;
-
-            color: #167532;
-        }
-
-        .maintenance {
-            background: #fff2cc;
-
-            color: #8a6500;
-        }
-
-        .inactive {
-            background: #ffe5e5;
-
-            color: #b00020;
-        }
-
-        .delete-button {
-            border: none;
-
-            padding: 7px 11px;
-
-            border-radius: 6px;
-
-            background: #b00020;
-
-            color: white;
-
-            cursor: pointer;
-
-            transition:
-                transform 140ms var(--ease-out),
-                background-color 180ms ease;
-        }
-
-        @media (hover: hover) and (pointer: fine) {
-
-            .delete-button:hover {
-                background: #870018;
-            }
-
-        }
-
-        .delete-button:focus-visible {
-            background: #870018;
-        }
-
-        .delete-button:active:not(:disabled) {
-            transform: scale(0.97);
-        }
-
-        .empty {
-            text-align: center;
-
-            padding: 30px;
-
-            color: #777;
-        }
-
-        @media (max-width: 700px) {
-
-            .form-grid {
-                grid-template-columns: 1fr;
-            }
-
-            .full {
-                grid-column: auto;
-            }
-
-            .navbar {
-                padding: 15px;
-
-                padding-top: calc(15px + env(safe-area-inset-top, 0px));
-
-                padding-left: max(15px, env(safe-area-inset-left, 0px));
-
-                padding-right: max(15px, env(safe-area-inset-right, 0px));
-
-                flex-direction: column;
-
-                gap: 12px;
-            }
-
-        }
-
-        /* reduced motion: fewer/gentler, not zero - keep fades and color, drop movement */
-        @media (prefers-reduced-motion: reduce) {
-
-            html {
-                scroll-behavior: auto;
-            }
-
-            .nav-links a,
-            .button,
-            .delete-button {
-                transform: none !important;
-            }
-
-            *,
-            *::before,
-            *::after {
-                animation-duration: 1ms !important;
-
-                animation-iteration-count: 1 !important;
-            }
-
-            /* flash message: opacity fade only, no slide */
-            .message {
-                animation-name: message-fade;
-
-                animation-duration: 200ms !important;
-            }
-
-        }
-
-    </style>
-
-<?php $glassTheme = "admin"; require __DIR__ . "/../includes/glass.php"; ?>
-</head>
-
-<body>
-
-<nav class="navbar">
-
-    <div class="brand">
-        ARVE'S House — Admin
-    </div>
-
-    <div class="nav-links">
-
-        <a href="dashboard.php">
-            Dashboard
-        </a>
-
-        <a href="../logout.php">
-            Logout
-        </a>
-
-    </div>
-
-</nav>
-
-
-<main class="container">
-
-    <div class="header">
-
-        <h1>Manage Rooms</h1>
-
-        <p>
-            Add and manage the rooms available for reservation.
-        </p>
-
-    </div>
-
-
-    <?php if (!empty($message)): ?>
-
-        <div class="message <?= $messageType ?>">
-
-            <?= htmlspecialchars($message) ?>
-
+    }
+</style>
+<?php admin_shell_body(); ?>
+
+<div class="stack">
+
+    <!-- NUMBERS -->
+
+    <section class="stats stats-compact" aria-label="All rooms">
+
+        <div class="stat tone-blue">
+            <div class="stat-main">
+                <div class="stat-label">Rooms</div>
+                <div class="stat-value"><?= number_format($counts["all"]) ?></div>
+                <div class="stat-note">In total</div>
+            </div>
+            <div class="stat-icon"><?= icon("bed") ?></div>
         </div>
 
-    <?php endif; ?>
-
-
-    <!-- ADD ROOM -->
-
-    <div class="form-card">
-
-        <h2>Add New Room</h2>
-
-        <form method="POST">
-
-            <div class="form-grid">
-
-                <div class="form-group">
-
-                    <label for="room_name">
-                        Room Name
-                    </label>
-
-                    <input
-                        type="text"
-                        id="room_name"
-                        name="room_name"
-                        placeholder="Example: Family Room"
-                        required
-                    >
-
-                </div>
-
-
-                <div class="form-group">
-
-                    <label for="capacity">
-                        Guest Capacity
-                    </label>
-
-                    <input
-                        type="number"
-                        id="capacity"
-                        name="capacity"
-                        inputmode="numeric"
-                        min="1"
-                        placeholder="Example: 4"
-                        required
-                    >
-
-                </div>
-
-
-                <div class="form-group">
-
-                    <label for="price">
-                        Price Per Night (₱)
-                    </label>
-
-                    <input
-                        type="number"
-                        id="price"
-                        name="price"
-                        inputmode="decimal"
-                        min="0"
-                        step="0.01"
-                        placeholder="Example: 1500"
-                        required
-                    >
-
-                </div>
-
-
-                <div class="form-group">
-
-                    <label for="status">
-                        Status
-                    </label>
-
-                    <select
-                        id="status"
-                        name="status"
-                    >
-
-                        <option value="available">
-                            Available
-                        </option>
-
-                        <option value="maintenance">
-                            Maintenance
-                        </option>
-
-                        <option value="inactive">
-                            Inactive
-                        </option>
-
-                    </select>
-
-                </div>
-
-
-                <div class="form-group full">
-
-                    <label for="description">
-                        Description
-                    </label>
-
-                    <textarea
-                        id="description"
-                        name="description"
-                        placeholder="Describe the room, amenities, beds, etc."
-                    ></textarea>
-
-                </div>
-
-
-                <div class="form-group full">
-
-                    <button
-                        class="button"
-                        type="submit"
-                        name="add_room"
-                    >
-                        + Add Room
-                    </button>
-
-                </div>
-
+        <div class="stat tone-green">
+            <div class="stat-main">
+                <div class="stat-label">Available</div>
+                <div class="stat-value"><?= number_format($counts["available"]) ?></div>
+                <div class="stat-note">Guests can book them</div>
             </div>
+            <div class="stat-icon"><?= icon("check-circle") ?></div>
+        </div>
 
-        </form>
+        <div class="stat tone-amber">
+            <div class="stat-main">
+                <div class="stat-label">Closed</div>
+                <div class="stat-value"><?= number_format($counts["maintenance"] + $counts["inactive"]) ?></div>
+                <div class="stat-note"><?= number_format($counts["maintenance"]) ?> maintenance, <?= number_format($counts["inactive"]) ?> inactive</div>
+            </div>
+            <div class="stat-icon"><?= icon("lock") ?></div>
+        </div>
 
-    </div>
+        <div class="stat tone-violet">
+            <div class="stat-main">
+                <div class="stat-label">Average price</div>
+                <div class="stat-value"><?= h(peso($counts["all"] > 0 ? $priceSum / $counts["all"] : 0)) ?></div>
+                <div class="stat-note">Per night</div>
+            </div>
+            <div class="stat-icon"><?= icon("banknote") ?></div>
+        </div>
+
+    </section>
 
 
-    <!-- ROOM LIST -->
+    <div>
 
-    <div class="rooms-card">
+        <div class="page-bar">
+            <form class="filter-form" method="get" role="search">
+                <div class="filter-search">
+                    <?= icon("search") ?>
+                    <label class="sr-only" for="q">Search rooms</label>
+                    <input class="input" type="search" id="q" name="q" value="<?= h($search) ?>" placeholder="Search rooms" autocomplete="off" enterkeyhint="search">
+                </div>
+                <button class="btn" type="submit">Search</button>
+            </form>
 
-        <h2>Rooms</h2>
+            <div class="page-bar-end">
+                <button class="btn btn-primary" type="button" data-dialog-open="room-add"><?= icon("plus") ?> Add room</button>
+            </div>
+        </div>
 
-        <?php if (count($rooms) === 0): ?>
+        <?php if ($search !== ""): ?>
+            <p class="filter-note">
+                <?= count($rooms) ?> <?= count($rooms) === 1 ? "room matches" : "rooms match" ?> “<?= h($search) ?>”.
+                <a href="rooms.php">Clear the search</a>
+            </p>
+        <?php endif; ?>
 
-            <div class="empty">
+        <?php if ($rooms): ?>
 
-                No rooms have been added yet.
+            <div class="rooms">
+                <?php foreach ($rooms as $room): ?>
+                    <?php
+                    $id = (int) $room["id"];
+                    $photos = room_photos($id);
+                    ?>
+                    <article class="card room">
+                        <div class="room-photo">
+                            <?php if ($photos): ?>
+                                <img src="<?= h(reset($photos)) ?>" alt="" loading="lazy" decoding="async">
+                                <span class="room-photo-count"><?= icon("image", 13) ?> <?= count($photos) ?></span>
+                            <?php else: ?>
+                                <div class="room-photo-none">
+                                    <?= icon("image", 26) ?>
+                                    <span>No photos yet</span>
+                                </div>
+                            <?php endif; ?>
+                            <?= status_pill($room["status"]) ?>
+                        </div>
 
+                        <div class="room-body">
+                            <div class="room-title">
+                                <h2><?= h($room["room_name"]) ?></h2>
+                                <div class="room-price"><?= h(peso($room["price"])) ?> <span>/ night</span></div>
+                            </div>
+
+                            <?php if (trim((string) $room["description"]) !== ""): ?>
+                                <p class="room-text"><?= h($room["description"]) ?></p>
+                            <?php endif; ?>
+
+                            <div class="room-facts">
+                                <span><?= icon("users", 14) ?> Up to <?= (int) $room["capacity"] ?> <?= (int) $room["capacity"] === 1 ? "guest" : "guests" ?></span>
+                                <span><?= icon("calendar", 14) ?> <?= (int) $room["reservations"] ?> <?= (int) $room["reservations"] === 1 ? "reservation" : "reservations" ?><?= (int) $room["upcoming"] > 0 ? ", " . (int) $room["upcoming"] . " upcoming" : "" ?></span>
+                            </div>
+
+                            <div class="room-actions">
+                                <button class="btn btn-sm" type="button" data-dialog-open="room-edit-<?= $id ?>"><?= icon("edit") ?> Edit</button>
+                                <button class="btn btn-sm" type="button" data-dialog-open="room-photos-<?= $id ?>"><?= icon("image") ?> Photos</button>
+                                <?php if (admin_can("calendar")): ?>
+                                    <a class="btn btn-sm" href="calendar.php?room=<?= $id ?>"><?= icon("calendar") ?> Calendar</a>
+                                <?php endif; ?>
+
+                                <?php if ((int) $room["reservations"] > 0): ?>
+                                    <!-- a room with reservations stays: its bookings and payments point to it -->
+                                    <button class="btn btn-sm btn-ghost" type="button" disabled
+                                        title="This room has reservations, so it cannot be deleted. Set its status to Inactive to hide it from guests."
+                                        aria-label="Delete (not possible: this room has reservations)"><?= icon("trash") ?></button>
+                                <?php else: ?>
+                                    <form class="inline-form" method="post" action="<?= h($here) ?>"
+                                        data-confirm="“<?= h($room["room_name"]) ?>” and its photos will be deleted. This cannot be undone."
+                                        data-confirm-title="Delete this room?"
+                                        data-confirm-ok="Delete"
+                                        data-confirm-tone="danger"
+                                    >
+                                        <?= csrf_field() ?>
+                                        <input type="hidden" name="action" value="delete">
+                                        <input type="hidden" name="room_id" value="<?= $id ?>">
+                                        <button class="btn btn-sm btn-danger-soft" type="submit" aria-label="Delete <?= h($room["room_name"]) ?>"><?= icon("trash") ?></button>
+                                    </form>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    </article>
+                <?php endforeach; ?>
             </div>
 
         <?php else: ?>
 
-            <div class="table-wrapper">
-
-                <table>
-
-                    <thead>
-
-                        <tr>
-
-                            <th>ID</th>
-
-                            <th>Room</th>
-
-                            <th>Capacity</th>
-
-                            <th>Price/Night</th>
-
-                            <th>Status</th>
-
-                            <th>Action</th>
-
-                        </tr>
-
-                    </thead>
-
-                    <tbody>
-
-                        <?php foreach ($rooms as $room): ?>
-
-                            <tr>
-
-                                <td>
-                                    <?= (int) $room["id"] ?>
-                                </td>
-
-                                <td>
-
-                                    <strong>
-                                        <?= htmlspecialchars($room["room_name"]) ?>
-                                    </strong>
-
-                                    <br>
-
-                                    <small>
-                                        <?= htmlspecialchars($room["description"]) ?>
-                                    </small>
-
-                                </td>
-
-                                <td>
-                                    <?= (int) $room["capacity"] ?> guests
-                                </td>
-
-                                <td>
-                                    ₱<?= number_format((float) $room["price"], 2) ?>
-                                </td>
-
-                                <td>
-
-                                    <span
-                                        class="status <?= htmlspecialchars($room["status"]) ?>"
-                                    >
-                                        <?= ucfirst(htmlspecialchars($room["status"])) ?>
-                                    </span>
-
-                                </td>
-
-                                <td>
-
-                                    <form
-                                        method="POST"
-                                        onsubmit="return confirm('Are you sure you want to delete this room?');"
-                                    >
-
-                                        <input
-                                            type="hidden"
-                                            name="room_id"
-                                            value="<?= (int) $room["id"] ?>"
-                                        >
-
-                                        <button
-                                            type="submit"
-                                            name="delete_room"
-                                            class="delete-button"
-                                        >
-                                            Delete
-                                        </button>
-
-                                    </form>
-
-                                </td>
-
-                            </tr>
-
-                        <?php endforeach; ?>
-
-                    </tbody>
-
-                </table>
-
-            </div>
+            <section class="card">
+                <div class="empty">
+                    <div class="empty-icon"><?= icon("bed", 22) ?></div>
+                    <h3><?= $search !== "" ? "No rooms found" : "No rooms yet" ?></h3>
+                    <p><?= $search !== "" ? "Nothing matches what you typed." : "Add your first room so guests can start booking." ?></p>
+                    <?php if ($search !== ""): ?>
+                        <a class="btn" href="rooms.php">Show all rooms</a>
+                    <?php else: ?>
+                        <button class="btn btn-primary" type="button" data-dialog-open="room-add"><?= icon("plus") ?> Add room</button>
+                    <?php endif; ?>
+                </div>
+            </section>
 
         <?php endif; ?>
 
     </div>
 
-</main>
+</div>
 
-</body>
 
-</html> 
+<!-- ADD A ROOM -->
+
+<dialog class="dialog dialog-wide" id="room-add" aria-labelledby="room-add-title" <?= $openDialog === "room-add" ? "data-dialog-auto" : "" ?>>
+    <form method="post" action="<?= h($here) ?>">
+        <div class="dialog-head">
+            <h2 id="room-add-title" tabindex="-1" autofocus>Add a room</h2>
+            <button class="btn btn-ghost btn-icon" type="button" data-dialog-close aria-label="Close"><?= icon("x") ?></button>
+        </div>
+
+        <div class="dialog-body">
+            <?php if ($openDialog === "room-add" && $formError !== ""): ?>
+                <div class="alert alert-error" role="alert"><?= icon("alert") ?><p><?= h($formError) ?></p></div>
+            <?php endif; ?>
+
+            <?= csrf_field() ?>
+            <input type="hidden" name="action" value="add">
+            <?php $roomForm("add", $openDialog === "room-add" ? $formValues : []); ?>
+        </div>
+
+        <div class="dialog-actions">
+            <button class="btn" type="button" data-dialog-close>Cancel</button>
+            <button class="btn btn-primary" type="submit">Add room</button>
+        </div>
+    </form>
+</dialog>
+
+
+<!-- EDIT AND PHOTOS, PER ROOM -->
+
+<?php foreach ($rooms as $room): ?>
+    <?php
+    $id = (int) $room["id"];
+    $photos = room_photos($id);
+    $editing = $openDialog === "room-edit-" . $id;
+    ?>
+
+    <dialog class="dialog dialog-wide" id="room-edit-<?= $id ?>" aria-labelledby="room-edit-<?= $id ?>-title" <?= $editing ? "data-dialog-auto" : "" ?>>
+        <form method="post" action="<?= h($here) ?>">
+            <div class="dialog-head">
+                <h2 id="room-edit-<?= $id ?>-title" tabindex="-1" autofocus>Edit <?= h($room["room_name"]) ?></h2>
+                <button class="btn btn-ghost btn-icon" type="button" data-dialog-close aria-label="Close"><?= icon("x") ?></button>
+            </div>
+
+            <div class="dialog-body">
+                <?php if ($editing && $formError !== ""): ?>
+                    <div class="alert alert-error" role="alert"><?= icon("alert") ?><p><?= h($formError) ?></p></div>
+                <?php endif; ?>
+
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="edit">
+                <input type="hidden" name="room_id" value="<?= $id ?>">
+                <?php $roomForm("edit-" . $id, $editing ? $formValues : $room); ?>
+
+                <?php if ((int) $room["upcoming"] > 0): ?>
+                    <p class="hint">
+                        This room has <?= (int) $room["upcoming"] ?> upcoming <?= (int) $room["upcoming"] === 1 ? "reservation" : "reservations" ?>.
+                        A new price only applies to new bookings, and closing the room does not cancel them.
+                    </p>
+                <?php endif; ?>
+            </div>
+
+            <div class="dialog-actions">
+                <button class="btn" type="button" data-dialog-close>Cancel</button>
+                <button class="btn btn-primary" type="submit">Save changes</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog class="dialog dialog-wide" id="room-photos-<?= $id ?>" aria-labelledby="room-photos-<?= $id ?>-title" <?= $openDialog === "room-photos-" . $id ? "data-dialog-auto" : "" ?>>
+        <div class="dialog-head">
+            <h2 id="room-photos-<?= $id ?>-title" tabindex="-1" autofocus>Photos of <?= h($room["room_name"]) ?></h2>
+            <button class="btn btn-ghost btn-icon" type="button" data-dialog-close aria-label="Close"><?= icon("x") ?></button>
+        </div>
+
+        <div class="dialog-body">
+            <div class="photo-grid">
+                <?php for ($slot = 1; $slot <= ROOM_PHOTO_SLOTS; $slot++): ?>
+                    <div class="photo-slot">
+                        <?php if (isset($photos[$slot])): ?>
+                            <img src="<?= h($photos[$slot]) ?>" alt="Photo <?= $slot ?>" loading="lazy" decoding="async">
+
+                            <?php if ($slot === 1): ?>
+                                <span class="photo-slot-tag">First</span>
+                            <?php endif; ?>
+
+                            <div class="photo-slot-actions">
+                                <?php if ($slot > 1): ?>
+                                    <form class="inline-form" method="post" action="<?= h($here) ?>">
+                                        <?= csrf_field() ?>
+                                        <input type="hidden" name="action" value="photo_first">
+                                        <input type="hidden" name="room_id" value="<?= $id ?>">
+                                        <input type="hidden" name="slot" value="<?= $slot ?>">
+                                        <button class="btn" type="submit">Make first</button>
+                                    </form>
+                                <?php endif; ?>
+
+                                <form class="inline-form" method="post" action="<?= h($here) ?>"
+                                    data-confirm="This photo will be removed from the room."
+                                    data-confirm-title="Remove this photo?"
+                                    data-confirm-ok="Remove"
+                                    data-confirm-tone="danger"
+                                >
+                                    <?= csrf_field() ?>
+                                    <input type="hidden" name="action" value="photo_remove">
+                                    <input type="hidden" name="room_id" value="<?= $id ?>">
+                                    <input type="hidden" name="slot" value="<?= $slot ?>">
+                                    <button class="btn" type="submit" aria-label="Remove photo <?= $slot ?>"><?= icon("trash", 14) ?></button>
+                                </form>
+                            </div>
+                        <?php else: ?>
+                            <div class="photo-slot-empty">Empty</div>
+                        <?php endif; ?>
+                    </div>
+                <?php endfor; ?>
+            </div>
+
+            <hr class="divider">
+
+            <?php if (count($photos) < ROOM_PHOTO_SLOTS): ?>
+                <form method="post" action="<?= h($here) ?>" enctype="multipart/form-data">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="action" value="photos_add">
+                    <input type="hidden" name="room_id" value="<?= $id ?>">
+
+                    <label class="field">
+                        <span class="label">Add photos (<?= ROOM_PHOTO_SLOTS - count($photos) ?> more fit)</span>
+                        <input class="input" type="file" name="photos[]" accept="image/jpeg,image/png,image/webp" multiple required>
+                    </label>
+                    <p class="hint">JPG, PNG or WebP, up to 5 MB each. The first photo is the one guests see first.</p>
+
+                    <div class="form-actions">
+                        <button class="btn btn-primary" type="submit"><?= icon("upload") ?> Upload</button>
+                    </div>
+                </form>
+            <?php else: ?>
+                <p class="note">This room has all <?= ROOM_PHOTO_SLOTS ?> photos. Remove one to add another.</p>
+            <?php endif; ?>
+        </div>
+
+        <div class="dialog-actions">
+            <button class="btn" type="button" data-dialog-close>Done</button>
+        </div>
+    </dialog>
+
+<?php endforeach; ?>
+
+<?php admin_shell_end(); ?>

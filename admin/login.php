@@ -3,8 +3,16 @@
 session_start();
 
 require_once __DIR__ . "/../config/database.php";
+require_once __DIR__ . "/../includes/admin-shell.php";
+
+// already logged in as an admin: straight to the dashboard
+if (isset($_SESSION["user_id"]) && ($_SESSION["role"] ?? "") === "admin") {
+    header("Location: dashboard.php");
+    exit;
+}
 
 $error = "";
+$email = "";
 
 if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
@@ -52,333 +60,202 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             $_SESSION["email"] = $user["email"];
             $_SESSION["role"] = "admin";
 
+            // admin logins are kept in the activity log
+            log_activity($pdo, "admin.login", $user["full_name"] . " logged in", [
+                "ip" => true,
+                "actor_id" => (int) $user["id"],
+                "actor_role" => "admin",
+                "actor_name" => $user["full_name"],
+            ]);
+
             header("Location: dashboard.php");
             exit;
         }
     }
 }
 
+$theme = admin_theme();
+
 ?>
-
 <!DOCTYPE html>
-<html lang="en">
-
+<html lang="en" data-theme="<?= $theme ?>">
 <head>
-
     <meta charset="UTF-8">
-
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0, viewport-fit=cover"
-    >
-
-    <meta
-        name="theme-color"
-        content="#211914"
-    >
-
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
+    <meta name="theme-color" content="<?= ADMIN_THEME_COLORS[$theme] ?>">
+    <meta name="color-scheme" content="<?= $theme === "light" ? "light dark" : "dark light" ?>">
+    <meta name="robots" content="noindex, nofollow">
     <title>Admin Login | ARVE'S House</title>
-
+    <link rel="stylesheet" href="<?= h(admin_asset("admin.css")) ?>">
     <style>
-
-        :root {
-            --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
-            --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
-            --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
-        }
-
-        * {
-            box-sizing: border-box;
-        }
-
-        html {
-            -webkit-tap-highlight-color: transparent;
-            -webkit-text-size-adjust: 100%;
-            text-size-adjust: 100%;
-        }
-
         body {
-            margin: 0;
+            display: grid;
+            place-items: center;
             min-height: 100vh;
             min-height: 100svh;
+            padding: max(24px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(24px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+        }
 
-            font-family: Arial, sans-serif;
+        /* a soft light behind the card, like the tiles of the dashboard */
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            z-index: -1;
+            background:
+                radial-gradient(40rem 30rem at 50% -10%, rgba(37, 99, 235, 0.22), transparent 70%),
+                radial-gradient(30rem 24rem at 100% 100%, rgba(124, 58, 237, 0.12), transparent 70%);
+            pointer-events: none;
+        }
 
-            background: #211914;
+        .login {
+            width: 100%;
+            max-width: 400px;
+        }
 
+        .login-brand {
             display: flex;
-            justify-content: center;
+            flex-direction: column;
             align-items: center;
-
-            padding: 20px;
-            padding:
-                max(20px, env(safe-area-inset-top, 0px))
-                max(20px, env(safe-area-inset-right, 0px))
-                max(20px, env(safe-area-inset-bottom, 0px))
-                max(20px, env(safe-area-inset-left, 0px));
-        }
-
-        .login-box {
-            width: 100%;
-            max-width: 420px;
-
-            background: #ffffff;
-
-            padding: 40px;
-
-            border-radius: 16px;
-
-            box-shadow: 0 15px 40px rgba(0,0,0,.3);
-        }
-
-        .logo {
+            margin-bottom: 22px;
             text-align: center;
-            margin-bottom: 30px;
         }
 
-        .logo h1 {
-            margin: 0;
-            color: #4b3025;
+        .login-brand .brand-mark {
+            width: 52px;
+            height: 52px;
+            margin-bottom: 14px;
+            border-radius: 15px;
+            font-size: 26px;
         }
 
-        .logo p {
-            color: #777;
-            margin-top: 8px;
+        .login-brand h1 {
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: -0.02em;
         }
 
-        .admin-label {
-            display: inline-block;
-
-            margin-top: 10px;
-
-            padding: 6px 12px;
-
-            border-radius: 20px;
-
-            background: #f0e3d2;
-
-            color: #6f4e37;
-
-            font-size: 12px;
-
-            font-weight: bold;
+        .login-brand p {
+            margin-top: 2px;
+            color: var(--text-3);
+            font-size: 13.5px;
         }
 
-        .form-group {
-            margin-bottom: 20px;
+        .login .card {
+            padding: 24px;
         }
 
-        label {
-            display: block;
-            margin-bottom: 7px;
-            font-weight: bold;
+        .login .btn {
+            min-height: 46px;
         }
 
-        input {
-            width: 100%;
-
-            padding: 13px;
-
-            border: 1px solid #ccc;
-
-            border-radius: 8px;
-
-            font-size: 15px;
+        .login-links {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            gap: 8px 16px;
+            margin-top: 18px;
+            font-size: 13px;
         }
 
-        button {
-            width: 100%;
-
-            padding: 14px;
-
-            border: 0;
-
-            border-radius: 8px;
-
-            background: #6f4e37;
-
-            color: white;
-
-            font-size: 16px;
-
-            font-weight: bold;
-
-            cursor: pointer;
-
-            touch-action: manipulation;
-
-            -webkit-user-select: none;
-            user-select: none;
-
-            transition:
-                transform 140ms var(--ease-out),
-                background-color 180ms ease;
+        .login-links a {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            min-height: 32px;
         }
 
-        button:active:not(:disabled) {
-            transform: scale(0.97);
+        .login-theme {
+            position: fixed;
+            top: max(16px, env(safe-area-inset-top, 0px));
+            right: max(16px, env(safe-area-inset-right, 0px));
         }
-
-        button:focus-visible {
-            background: #563a29;
-        }
-
-        @media (hover: hover) and (pointer: fine) {
-
-            button:hover {
-                background: #563a29;
-            }
-
-        }
-
-        .error {
-            background: #ffe5e5;
-            color: #b00020;
-
-            padding: 12px;
-
-            border-radius: 8px;
-
-            margin-bottom: 20px;
-
-            text-align: center;
-
-            animation: alert-in 240ms var(--ease-out) both;
-        }
-
-        @keyframes alert-in {
-            from {
-                opacity: 0;
-                transform: translateY(-4px);
-            }
-        }
-
-        .back {
-            text-align: center;
-            margin-top: 20px;
-        }
-
-        .back a {
-            color: #6f4e37;
-            text-decoration: none;
-
-            touch-action: manipulation;
-        }
-
-        @media (pointer: coarse) {
-
-            input,
-            select,
-            textarea {
-                font-size: 16px;
-            }
-
-        }
-
-        @media (prefers-reduced-motion: reduce) {
-
-            html {
-                scroll-behavior: auto;
-            }
-
-            /* no press scale, no alert slide; the button colour fade stays */
-            button,
-            .error {
-                transform: none !important;
-            }
-
-            *,
-            *::before,
-            *::after {
-                animation-duration: 1ms !important;
-                animation-iteration-count: 1 !important;
-            }
-
-        }
-
     </style>
-
-<?php $glassTheme = "admin"; require __DIR__ . "/../includes/glass.php"; ?>
 </head>
-
 <body>
 
-    <div class="login-box">
+    <button class="icon-btn theme-toggle login-theme" type="button" id="theme-toggle" aria-label="Switch between the light and dark theme">
+        <?= icon("sun") ?><?= icon("moon") ?>
+    </button>
 
-        <div class="logo">
+    <main class="login">
 
+        <div class="login-brand">
+            <span class="brand-mark"><?= icon("home") ?></span>
             <h1>ARVE'S House</h1>
+            <p>Admin panel</p>
+        </div>
 
-            <p>Transient & Reservation System</p>
+        <div class="card">
 
-            <span class="admin-label">
-                ADMINISTRATOR
-            </span>
+            <?php if (!empty($error)): ?>
+                <div class="alert alert-error alert-in" role="alert">
+                    <?= icon("alert") ?>
+                    <p><?= h($error) ?></p>
+                </div>
+            <?php endif; ?>
+
+            <form method="post">
+
+                <label class="field">
+                    <span class="label">Email address</span>
+                    <input
+                        class="input"
+                        type="email"
+                        id="email"
+                        name="email"
+                        value="<?= h($email) ?>"
+                        placeholder="Administrator email"
+                        autocomplete="username"
+                        autocapitalize="none"
+                        autocorrect="off"
+                        spellcheck="false"
+                        required
+                        <?= $email === "" ? "autofocus" : "" ?>
+                    >
+                </label>
+
+                <label class="field">
+                    <span class="label">Password</span>
+                    <input
+                        class="input"
+                        type="password"
+                        id="password"
+                        name="password"
+                        placeholder="Administrator password"
+                        autocomplete="current-password"
+                        enterkeyhint="go"
+                        required
+                        <?= $email !== "" ? "autofocus" : "" ?>
+                    >
+                </label>
+
+                <div class="form-actions">
+                    <button class="btn btn-primary btn-block" type="submit"><?= icon("log-in") ?> Log in</button>
+                </div>
+
+            </form>
 
         </div>
 
-        <?php if (!empty($error)): ?>
-
-            <div class="error">
-                <?= htmlspecialchars($error) ?>
-            </div>
-
-        <?php endif; ?>
-
-        <form method="POST">
-
-            <div class="form-group">
-
-                <label for="email">
-                    Email Address
-                </label>
-
-                <input
-                    type="email"
-                    id="email"
-                    name="email"
-                    placeholder="Administrator email"
-                    autocomplete="username"
-                    autocapitalize="none"
-                    autocorrect="off"
-                    spellcheck="false"
-                    required
-                >
-
-            </div>
-
-            <div class="form-group">
-
-                <label for="password">
-                    Password
-                </label>
-
-                <input
-                    type="password"
-                    id="password"
-                    name="password"
-                    placeholder="Administrator password"
-                    autocomplete="current-password"
-                    enterkeyhint="go"
-                    required
-                >
-
-            </div>
-
-            <button type="submit">
-                Admin Login
-            </button>
-
-        </form>
-
-        <div class="back">
-            <a href="../login.php">
-                ← Customer Login
-            </a>
+        <div class="login-links">
+            <a href="../login.php"><?= icon("arrow-left", 14) ?> Customer login</a>
+            <a href="../index.php">View website</a>
         </div>
 
-    </div>
+    </main>
+
+    <script>
+        // the same switch as inside the panel: remembered for a year
+        document.getElementById("theme-toggle").addEventListener("click", function () {
+            var theme = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+            var colors = <?= json_encode(ADMIN_THEME_COLORS) ?>;
+
+            document.documentElement.dataset.theme = theme;
+            document.cookie = "<?= ADMIN_THEME_COOKIE ?>=" + theme + "; path=/; max-age=31536000; samesite=lax";
+            document.querySelector('meta[name="theme-color"]').content = colors[theme];
+        });
+    </script>
 
 </body>
-
 </html>

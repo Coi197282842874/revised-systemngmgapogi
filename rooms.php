@@ -1711,10 +1711,10 @@ function roomImages(int $roomId): array
         <?php elseif ($isAdmin): ?>
 
             <a
-                href="admin/dashboard.php"
+                href="logout.php"
                 class="action-link"
             >
-                Admin Dashboard
+                Logout
             </a>
 
 

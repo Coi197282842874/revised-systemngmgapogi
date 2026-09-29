@@ -2,14 +2,11 @@
 session_start();
 
 require_once __DIR__ . "/../config/database.php";
-require_once __DIR__ . "/../includes/auth.php";
+require_once __DIR__ . "/../includes/admin-shell.php";
 
-if (!isset($_SESSION["user_id"]) || ($_SESSION["role"] ?? "") !== "admin") {
-    header("Location: ../login.php");
-    exit;
-}
+// Every admin can open this page: it only concerns their own account.
+$admin = admin_boot($pdo);
 
-$message = "";
 $error = "";
 
 if ($_SERVER["REQUEST_METHOD"] === "POST") {
@@ -18,10 +15,10 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     $confirm = $_POST["confirm_password"] ?? "";
 
     $stmt = $pdo->prepare("SELECT password FROM users WHERE id = ? AND role = 'admin'");
-    $stmt->execute([$_SESSION["user_id"]]);
+    $stmt->execute([$admin["id"]]);
     $hash = $stmt->fetchColumn();
 
-    if (!csrf_valid($_POST["csrf_token"] ?? null)) {
+    if (!admin_check_csrf()) {
         $error = "Your session expired. Please try again.";
     } elseif ($hash === false || !password_verify($current, $hash)) {
         $error = "Your current password is incorrect.";
@@ -35,75 +32,104 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         $error = "The new passwords don't match.";
     } else {
         $pdo->prepare("UPDATE users SET password = ? WHERE id = ?")
-            ->execute([password_hash($new, PASSWORD_DEFAULT), $_SESSION["user_id"]]);
+            ->execute([password_hash($new, PASSWORD_DEFAULT), $admin["id"]]);
+
         session_regenerate_id(true);
-        $message = "Password changed. Use the new password the next time you log in.";
+
+        log_activity($pdo, "admin.password_changed", "Changed their password", [
+            "entity_type" => "admin",
+            "entity_id" => (int) $admin["id"],
+            "link" => "account.php",
+        ]);
+
+        admin_flash("Password changed. Use the new password the next time you log in.");
+
+        header("Location: account.php");
+        exit;
     }
 }
+
+$permissions = admin_role_permissions($pdo)[$admin["admin_role"]] ?? [];
+
+admin_shell_head([
+    "title" => "Your account",
+    "subtitle" => "Your details and your password",
+    "active" => "",
+    "narrow" => true,
+]);
 ?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <meta name="theme-color" content="#f3f4f6">
-    <title>Change Password | ARVE'S House</title>
-    <style>
-        :root { --ease-out: cubic-bezier(0.23, 1, 0.32, 1); }
-        * { box-sizing: border-box; }
-        html { -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
-        body { margin: 0; padding: 35px 20px; padding: max(35px, env(safe-area-inset-top, 0px)) max(20px, env(safe-area-inset-right, 0px)) max(35px, env(safe-area-inset-bottom, 0px)) max(20px, env(safe-area-inset-left, 0px)); font-family: Arial, sans-serif; background: #f3f4f6; color: #1f2937; }
-        .page { max-width: 480px; margin: 0 auto; }
-        .topbar { display: flex; justify-content: space-between; align-items: center; gap: 15px; margin-bottom: 25px; }
-        .topbar a { color: #2563eb; text-decoration: none; touch-action: manipulation; }
-        .panel { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,.08); }
-        label { display: block; margin: 16px 0 7px; font-weight: bold; }
-        input { width: 100%; padding: 11px; border: 1px solid #d1d5db; border-radius: 7px; font-size: 15px; }
-        .hint { margin: 6px 0 0; font-size: 13px; color: #6b7280; }
-        button { margin-top: 22px; width: 100%; border: 0; border-radius: 7px; padding: 12px 18px; background: #2563eb; color: white; font-weight: bold; cursor: pointer; touch-action: manipulation; -webkit-user-select: none; user-select: none; transition: transform 140ms var(--ease-out); }
-        button:active:not(:disabled) { transform: scale(0.97); }
-        .message { padding: 12px; border-radius: 7px; margin-bottom: 15px; background: #d1fae5; color: #065f46; animation: alert-in 240ms var(--ease-out) both; }
-        .error { padding: 12px; border-radius: 7px; margin-bottom: 15px; background: #fee2e2; color: #991b1b; animation: alert-in 240ms var(--ease-out) both; }
-        @keyframes alert-in { from { opacity: 0; transform: translateY(-4px); } }
-        @media (max-width: 700px) { .topbar { align-items: flex-start; flex-direction: column; } }
-        @media (pointer: coarse) { input { font-size: 16px; } }
-        @media (prefers-reduced-motion: reduce) {
-            button, .message, .error { transform: none !important; }
-            *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; }
-        }
-    </style>
-<?php $glassTheme = "admin"; require __DIR__ . "/../includes/glass.php"; ?>
-</head>
-<body>
-    <main class="page">
-        <div class="topbar">
-            <div>
-                <h1>Change Password</h1>
-                <p><?= htmlspecialchars($_SESSION["email"] ?? "") ?></p>
+<?php admin_shell_body(); ?>
+
+<div class="grid grid-2" style="align-items:start">
+
+    <section class="card card-pad">
+        <div class="person" style="margin-bottom:16px">
+            <?= admin_avatar($admin, 56) ?>
+            <div class="person-text">
+                <span class="person-name" style="max-width:none;font-size:16px"><?= h($admin["full_name"]) ?></span>
+                <span class="person-sub" style="max-width:none"><?= h($admin["email"]) ?></span>
             </div>
-            <a href="dashboard.php">Back to Dashboard</a>
         </div>
 
-        <section class="panel">
-            <?php if ($message !== ""): ?><div class="message"><?= htmlspecialchars($message) ?></div><?php endif; ?>
-            <?php if ($error !== ""): ?><div class="error"><?= htmlspecialchars($error) ?></div><?php endif; ?>
+        <dl class="kv">
+            <dt>Role</dt>
+            <dd><?= h(admin_role_label($admin["admin_role"])) ?></dd>
 
-            <form method="post" autocomplete="off">
-                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrf_token()) ?>">
+            <dt>Admin since</dt>
+            <dd><?= h(admin_date($admin["created_at"], "F j, Y")) ?></dd>
 
-                <label for="current_password">Current password</label>
-                <input type="password" id="current_password" name="current_password" autocomplete="current-password" required>
+            <dt>You can open</dt>
+            <dd>
+                <?php if ($admin["admin_role"] === "owner"): ?>
+                    Everything
+                <?php elseif ($permissions): ?>
+                    <?= h(implode(", ", array_map(fn ($key) => ADMIN_PERMISSIONS[$key]["label"], $permissions))) ?>
+                <?php else: ?>
+                    The Dashboard and Notifications
+                <?php endif; ?>
+            </dd>
+        </dl>
 
-                <label for="new_password">New password</label>
-                <input type="password" id="new_password" name="new_password" autocomplete="new-password" minlength="10" required>
-                <p class="hint">At least 10 characters, with letters and numbers.</p>
+        <?php if ($admin["admin_role"] !== "owner"): ?>
+            <p class="hint">A Super Admin can change your role and what it opens.</p>
+        <?php endif; ?>
+    </section>
 
-                <label for="confirm_password">Confirm new password</label>
-                <input type="password" id="confirm_password" name="confirm_password" autocomplete="new-password" minlength="10" required>
+    <section class="card card-pad">
+        <h2 class="card-title">Change password</h2>
+        <p class="card-sub" style="margin-bottom:16px">At least 10 characters, with letters and numbers</p>
 
-                <button type="submit">Change Password</button>
-            </form>
-        </section>
-    </main>
-</body>
-</html>
+        <?php if ($error !== ""): ?>
+            <div class="alert alert-error alert-in" role="alert"><?= icon("alert") ?><p><?= h($error) ?></p></div>
+        <?php endif; ?>
+
+        <form method="post">
+            <?= csrf_field() ?>
+
+            <!-- helps password managers save the new password under the right account -->
+            <input type="text" name="username" value="<?= h($admin["email"]) ?>" autocomplete="username" hidden>
+
+            <label class="field">
+                <span class="label">Current password</span>
+                <input class="input" type="password" name="current_password" autocomplete="current-password" required>
+            </label>
+
+            <label class="field">
+                <span class="label">New password</span>
+                <input class="input" type="password" name="new_password" autocomplete="new-password" minlength="10" required>
+            </label>
+
+            <label class="field">
+                <span class="label">Confirm new password</span>
+                <input class="input" type="password" name="confirm_password" autocomplete="new-password" minlength="10" required>
+            </label>
+
+            <div class="form-actions">
+                <button class="btn btn-primary btn-block" type="submit"><?= icon("key") ?> Change password</button>
+            </div>
+        </form>
+    </section>
+
+</div>
+
+<?php admin_shell_end(); ?>

@@ -6,6 +6,7 @@ require_once __DIR__ . "/config/database.php";
 require_once __DIR__ . "/includes/icons.php";
 require_once __DIR__ . "/includes/auth.php";
 require_once __DIR__ . "/includes/availability.php";
+require_once __DIR__ . "/includes/activity.php";
 
 ensure_auth_schema($pdo);
 ensure_availability_schema($pdo);
@@ -357,10 +358,26 @@ if (
                         utc_now()
                     ]);
 
+                    $reservationId = (int) $pdo->lastInsertId();
+
+                    // shows up in the admin's notifications and activity log
+                    log_activity(
+                        $pdo,
+                        "reservation.created",
+                        ($_SESSION["full_name"] ?? "A customer") . " booked " . $room["room_name"] . ", "
+                            . date("M j", strtotime($checkIn)) . " to " . date("M j", strtotime($checkOut)),
+                        [
+                            "entity_type" => "reservation",
+                            "entity_id" => $reservationId,
+                            "link" => "reservations.php?q=" . $reservationId,
+                            "notify" => true,
+                        ]
+                    );
+
 
                     header(
                         "Location: reservation_success.php?id=" .
-                        $pdo->lastInsertId()
+                        $reservationId
                     );
 
                     exit;

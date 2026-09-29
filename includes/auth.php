@@ -742,6 +742,20 @@ function google_handle_callback(PDO $pdo, array $query, ?array $attempt, callabl
             $stmt = $pdo->prepare("{$select} WHERE google_id = ? LIMIT 1");
             $stmt->execute([$googleId]);
             $user = $stmt->fetch();
+
+            if ($user) {
+                require_once __DIR__ . "/activity.php";
+
+                log_activity($pdo, "customer.registered", $user["full_name"] . " created an account with Google", [
+                    "actor_id" => (int) $user["id"],
+                    "actor_role" => "customer",
+                    "actor_name" => $user["full_name"],
+                    "entity_type" => "customer",
+                    "entity_id" => (int) $user["id"],
+                    "link" => "customers.php?q=" . str_replace("~", "%7E", rawurlencode($user["email"])),
+                    "notify" => true,
+                ]);
+            }
         }
     }
 

@@ -5,6 +5,7 @@ session_start();
 require_once __DIR__ . "/config/database.php";
 require_once __DIR__ . "/includes/icons.php";
 require_once __DIR__ . "/includes/auth.php";
+require_once __DIR__ . "/includes/activity.php";
 
 ensure_auth_schema($pdo);
 
@@ -133,6 +134,16 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             // ======================================================
 
             login_user($user);
+
+            // admin logins are kept in the activity log (customers' are not)
+            if ($user["role"] === "admin") {
+                log_activity($pdo, "admin.login", $user["full_name"] . " logged in", [
+                    "ip" => true,
+                    "actor_id" => (int) $user["id"],
+                    "actor_role" => "admin",
+                    "actor_name" => $user["full_name"],
+                ]);
+            }
 
             finishLogin(destination_for($user, $redirect), $wantsJson);
         }

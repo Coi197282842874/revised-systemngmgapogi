@@ -2,17 +2,14 @@
 session_start();
 
 require_once __DIR__ . "/../config/database.php";
+require_once __DIR__ . "/../includes/admin-shell.php";
 require_once __DIR__ . "/../includes/availability.php";
-require_once __DIR__ . "/../includes/icons.php";
 
 // ======================================================
 // BOOKING CALENDAR + CLOSED DATES
 // ======================================================
 
-if (!isset($_SESSION["user_id"]) || ($_SESSION["role"] ?? "") !== "admin") {
-    header("Location: ../login.php");
-    exit;
-}
+$admin = admin_boot($pdo, "calendar");
 
 ensure_availability_schema($pdo);
 
@@ -22,24 +19,62 @@ $roomNames = array_column($rooms, "room_name", "id");
 $roomFilter = $_GET["room"] ?? "all";
 $roomFilter = ($roomFilter !== "all" && isset($roomNames[(int) $roomFilter])) ? (int) $roomFilter : "all";
 
-$monthParam = preg_match('/^\d{4}-\d{2}$/', $_GET["month"] ?? "") ? $_GET["month"] : date("Y-m");
+$monthParam = preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $_GET["month"] ?? "") ? $_GET["month"] : date("Y-m");
 $monthStart = new DateTimeImmutable($monthParam . "-01");
 $monthEnd = $monthStart->modify("last day of this month");
 
-$message = "";
 $error = "";
-$form = ["room_id" => "all", "start_date" => "", "end_date" => "", "reason" => ""];
+$form = ["room_id" => $roomFilter === "all" ? "all" : (string) $roomFilter, "start_date" => "", "end_date" => "", "reason" => ""];
+
+function cal_link(string $month, $room): string
+{
+    return admin_url("calendar.php", ["month" => $month === date("Y-m") ? "" : $month, "room" => $room]);
+}
+
+// "Oct 12 to Oct 14" (or "Oct 12" for one day), for the activity log
+function cal_range(string $start, string $end): string
+{
+    return $start === $end
+        ? date("M j", strtotime($start))
+        : date("M j", strtotime($start)) . " to " . date("M j", strtotime($end));
+}
+
+function block_label(array $block, array $roomNames): string
+{
+    $range = $block["start_date"] === $block["end_date"]
+        ? date("M j, Y", strtotime($block["start_date"]))
+        : date("M j", strtotime($block["start_date"])) . " – " . date("M j, Y", strtotime($block["end_date"]));
+
+    return $range . " · " . ($block["room_id"] === null ? "All rooms" : ($roomNames[$block["room_id"]] ?? "Room"));
+}
 
 // ------------------------------------------------------
 // ADD / REMOVE A CLOSED PERIOD
 // ------------------------------------------------------
 
 if ($_SERVER["REQUEST_METHOD"] === "POST") {
-    if (!csrf_valid($_POST["csrf_token"] ?? null)) {
+    if (!admin_check_csrf()) {
         $error = "Your session expired. Please try again.";
     } elseif (isset($_POST["delete_block"])) {
-        $pdo->prepare("DELETE FROM room_blocks WHERE id = ?")->execute([(int) $_POST["delete_block"]]);
-        header("Location: calendar.php?" . http_build_query(["month" => $monthParam, "room" => $roomFilter, "removed" => 1]));
+        $stmt = $pdo->prepare("SELECT * FROM room_blocks WHERE id = ?");
+        $stmt->execute([(int) $_POST["delete_block"]]);
+        $block = $stmt->fetch();
+
+        if ($block) {
+            $pdo->prepare("DELETE FROM room_blocks WHERE id = ?")->execute([(int) $block["id"]]);
+
+            log_activity(
+                $pdo,
+                "dates.opened",
+                "Opened " . ($block["room_id"] === null ? "all rooms" : ($roomNames[$block["room_id"]] ?? "a room"))
+                    . " again, " . cal_range($block["start_date"], $block["end_date"]),
+                ["entity_type" => "block", "entity_id" => (int) $block["id"], "link" => "calendar.php?month=" . substr($block["start_date"], 0, 7)]
+            );
+
+            admin_flash("Closed dates removed. Those dates can be booked again.");
+        }
+
+        header("Location: " . cal_link($monthParam, $roomFilter));
         exit;
     } else {
         $form = [
@@ -62,10 +97,14 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         } elseif ($roomId !== null && !isset($roomNames[$roomId])) {
             $error = "Please choose a valid room.";
         } else {
+            $reason = mb_substr($form["reason"], 0, 150);
+
             $pdo->prepare(
                 "INSERT INTO room_blocks (room_id, start_date, end_date, reason, created_by, created_at)
                  VALUES (?, ?, ?, ?, ?, ?)"
-            )->execute([$roomId, $form["start_date"], $form["end_date"], mb_substr($form["reason"], 0, 150), (int) $_SESSION["user_id"], utc_now()]);
+            )->execute([$roomId, $form["start_date"], $form["end_date"], $reason, (int) $admin["id"], utc_now()]);
+
+            $blockId = (int) $pdo->lastInsertId();
 
             // bookings already inside the closed dates are kept; tell the admin about them
             $clash = $pdo->prepare(
@@ -76,26 +115,29 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             $clash->execute(array_merge([$form["end_date"], $form["start_date"]], $roomId !== null ? [$roomId] : []));
             $clashes = (int) $clash->fetchColumn();
 
-            header("Location: calendar.php?" . http_build_query([
-                "month" => $start->format("Y-m"),
-                "room" => $roomId ?? "all",
-                "added" => 1,
-                "clashes" => $clashes,
-            ]));
+            log_activity(
+                $pdo,
+                "dates.closed",
+                "Closed " . ($roomId === null ? "all rooms" : $roomNames[$roomId]) . ", "
+                    . cal_range($form["start_date"], $form["end_date"]) . ($reason !== "" ? ": " . $reason : ""),
+                ["entity_type" => "block", "entity_id" => $blockId, "link" => "calendar.php?month=" . $start->format("Y-m")]
+            );
+
+            admin_flash("Dates closed. Guests can no longer book them.");
+
+            if ($clashes > 0) {
+                admin_flash(
+                    $clashes . ($clashes === 1 ? " existing reservation falls" : " existing reservations fall")
+                        . " inside those dates and " . ($clashes === 1 ? "was" : "were") . " kept. Contact the guest"
+                        . ($clashes === 1 ? "" : "s") . " if needed.",
+                    "error"
+                );
+            }
+
+            header("Location: " . cal_link($start->format("Y-m"), $roomId ?? "all"));
             exit;
         }
     }
-}
-
-if (isset($_GET["added"])) {
-    $message = "Dates closed. Guests can no longer book them.";
-    if ((int) ($_GET["clashes"] ?? 0) > 0) {
-        $error = (int) $_GET["clashes"] . " existing reservation(s) fall inside those dates and were kept. Contact the guest(s) if needed.";
-    }
-}
-
-if (isset($_GET["removed"])) {
-    $message = "Closed dates removed. Those dates can be booked again.";
 }
 
 // ------------------------------------------------------
@@ -105,7 +147,7 @@ if (isset($_GET["removed"])) {
 $from = $monthStart->format("Y-m-d");
 $to = $monthEnd->format("Y-m-d");
 
-$sql = "SELECT r.id, r.room_id, r.check_in, r.check_out, r.status, r.guests, u.full_name
+$sql = "SELECT r.id, r.room_id, r.check_in, r.check_out, r.status, r.guests, r.total_amount, u.full_name, u.profile_image
         FROM reservations r
         JOIN users u ON u.id = r.user_id
         WHERE r.status IN ('pending', 'confirmed', 'completed')
@@ -145,134 +187,279 @@ $prevMonth = $monthStart->modify("-1 month")->format("Y-m");
 $nextMonth = $monthStart->modify("+1 month")->format("Y-m");
 $today = date("Y-m-d");
 
-function cal_link(string $month, $room): string
-{
-    return "calendar.php?" . http_build_query(["month" => $month, "room" => $room]);
-}
+// each kind of day entry has its own icon, so it is never told apart by color alone
+$chipIcons = ["confirmed" => "check-circle", "pending" => "clock", "completed" => "star"];
 
-function block_label(array $block, array $roomNames): string
-{
-    $range = $block["start_date"] === $block["end_date"]
-        ? date("M j, Y", strtotime($block["start_date"]))
-        : date("M j", strtotime($block["start_date"])) . " – " . date("M j, Y", strtotime($block["end_date"]));
-
-    return $range . " · " . ($block["room_id"] === null ? "All rooms" : ($roomNames[$block["room_id"]] ?? "Room"));
-}
+admin_shell_head([
+    "title" => "Calendar",
+    "subtitle" => "Bookings per day, and dates you close for maintenance or personal use",
+    "active" => "calendar",
+]);
 ?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <meta name="theme-color" content="#f3f4f6">
-    <title>Calendar | ARVE'S House</title>
-    <style>
-        :root { --ease-out: cubic-bezier(0.23, 1, 0.32, 1); --ink: #111827; --muted: #6b7280; --line: rgba(17, 24, 39, 0.08); --accent: #2563eb; }
-        * { box-sizing: border-box; }
-        html { -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
-        body { margin: 0; padding: 24px 20px; padding: max(24px, env(safe-area-inset-top, 0px)) max(20px, env(safe-area-inset-right, 0px)) max(24px, env(safe-area-inset-bottom, 0px)) max(20px, env(safe-area-inset-left, 0px)); font-family: Arial, sans-serif; background: #f3f4f6; color: var(--ink); }
-        a { touch-action: manipulation; }
-        .page { max-width: 1180px; margin: 0 auto; }
-        .topbar { display: flex; justify-content: space-between; align-items: center; gap: 15px; margin-bottom: 18px; }
-        .topbar h1 { margin: 0; font-size: 26px; }
-        .topbar p { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
-        .topbar a { color: var(--accent); text-decoration: none; font-size: 14px; white-space: nowrap; }
+<style>
+    .cal-bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--line);
+    }
 
-        .layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 18px; align-items: start; }
-        .panel { border-radius: 16px; background: #fff; box-shadow: 0 4px 15px rgba(0,0,0,.08); }
-        .panel-pad { padding: 18px; }
-        .panel h2 { margin: 0 0 12px; font-size: 17px; }
+    .cal-nav {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
 
-        .cal-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
-        .cal-nav { display: flex; align-items: center; gap: 8px; }
-        .cal-nav a { display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid #e5e7eb; border-radius: 999px; background: #fff; color: var(--ink); font-size: 20px; text-decoration: none; }
-        .cal-nav strong { min-width: 150px; text-align: center; font-size: 16px; }
-        .cal-bar select { padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 8px; font: inherit; font-size: 14px; background: #fff; }
+    .cal-nav strong {
+        min-width: 150px;
+        font-size: 16px;
+        text-align: center;
+    }
 
-        .cal { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
-        .wd { padding: 8px 6px; border-bottom: 1px solid var(--line); font-size: 11px; font-weight: 700; color: var(--muted); text-align: center; text-transform: uppercase; }
-        .day { min-height: 108px; padding: 6px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-        .day:nth-child(7n) { border-right: 0; }
-        .day.out { background: rgba(17, 24, 39, 0.025); }
-        .day.closed { background: repeating-linear-gradient(135deg, rgba(220, 38, 38, 0.05) 0 6px, rgba(220, 38, 38, 0.09) 6px 12px); }
-        .num { display: inline-grid; place-items: center; min-width: 24px; height: 24px; padding: 0 5px; border-radius: 999px; font-size: 12px; font-weight: 700; color: var(--muted); }
-        .day.today .num { background: var(--accent); color: #fff; }
-        .chip { display: block; margin-top: 4px; padding: 3px 6px; overflow: hidden; border-radius: 6px; font-size: 11px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; text-decoration: none; }
-        .chip.confirmed { background: #dcfce7; color: #166534; }
-        .chip.pending { background: #fef3c7; color: #92400e; }
-        .chip.completed { background: #e0e7ff; color: #3730a3; }
-        .chip.block { background: #fee2e2; color: #991b1b; }
+    .cal-tools {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
 
-        .legend { display: flex; flex-wrap: wrap; gap: 12px; padding: 12px 16px; font-size: 12px; color: var(--muted); }
-        .legend span { display: inline-flex; align-items: center; gap: 6px; }
-        .legend i { width: 12px; height: 12px; border-radius: 4px; }
+    .cal-tools .select {
+        width: auto;
+        min-width: 150px;
+        background-color: var(--surface);
+    }
 
-        label { display: block; margin: 12px 0 6px; font-size: 13px; font-weight: 700; }
-        input, select, textarea { width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; font: inherit; font-size: 14px; background: #fff; }
-        .row2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
-        .row2 input { min-width: 0; }
-        .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; width: 100%; margin-top: 16px; padding: 12px; border: 0; border-radius: 10px; background: #dc2626; color: #fff; font: inherit; font-weight: 700; cursor: pointer; transition: transform 140ms var(--ease-out); }
-        .btn:active { transform: scale(.97); }
-        .hint { margin: 8px 0 0; font-size: 12px; color: var(--muted); line-height: 1.45; }
-        .notice { margin-bottom: 14px; padding: 11px 14px; border-radius: 10px; font-size: 14px; }
-        .notice.ok { background: #dcfce7; color: #166534; }
-        .notice.warn { background: #fef3c7; color: #92400e; }
+    .cal {
+        display: grid;
+        grid-template-columns: repeat(7, minmax(0, 1fr));
+    }
 
-        .blocks { list-style: none; margin: 0; padding: 0; }
-        .blocks li { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); font-size: 13px; }
-        .blocks li:first-child { border-top: 0; }
-        .blocks strong { display: block; }
-        .blocks small { color: var(--muted); }
-        .remove { flex: none; padding: 6px 10px; border: 1px solid #fecaca; border-radius: 8px; background: #fff; color: #b91c1c; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
-        .none { color: var(--muted); font-size: 13px; }
+    .wd {
+        padding: 9px 6px;
+        border-bottom: 1px solid var(--line);
+        color: var(--text-3);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-align: center;
+        text-transform: uppercase;
+    }
 
-        @media (pointer: coarse) { input, select, textarea { font-size: 16px; } }
-        @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
-        @media (max-width: 640px) {
-            body { padding-left: 10px; padding-right: 10px; }
-            .topbar { flex-direction: column; align-items: flex-start; gap: 8px; }
-            .topbar h1 { font-size: 22px; }
-            .day { min-height: 64px; padding: 3px; }
-            .chip { padding: 2px 3px; font-size: 9.5px; }
-            .chip .who { display: none; }
-            .cal-nav strong { min-width: 120px; font-size: 15px; }
+    .day {
+        min-width: 0;
+        min-height: 112px;
+        padding: 6px;
+        border-right: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+    }
+
+    .day:nth-child(7n) {
+        border-right: 0;
+    }
+
+    .day.out {
+        background: var(--surface-2);
+    }
+
+    .day.past .day-num {
+        opacity: 0.55;
+    }
+
+    /* closed days wear stripes */
+    .day.closed {
+        background-image: repeating-linear-gradient(135deg, transparent 0 7px, var(--danger-soft) 7px 14px);
+    }
+
+    .day-num {
+        display: inline-grid;
+        place-items: center;
+        min-width: 24px;
+        height: 24px;
+        padding: 0 5px;
+        border-radius: 999px;
+        color: var(--text-2);
+        font-size: 12px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+    }
+
+    .day.today .day-num {
+        background: var(--accent);
+        color: var(--on-accent);
+        opacity: 1;
+    }
+
+    .chip {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        margin-top: 4px;
+        padding: 3px 6px;
+        overflow: hidden;
+        border-radius: 6px;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 1.35;
+        white-space: nowrap;
+    }
+
+    .chip:hover {
+        text-decoration: none;
+    }
+
+    .chip .i {
+        width: 11px;
+        height: 11px;
+    }
+
+    .chip .who {
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .chip.confirmed { background: var(--success-soft); color: var(--success); }
+    .chip.pending { background: var(--warning-soft); color: var(--warning); }
+    .chip.completed { background: var(--info-soft); color: var(--info); }
+    .chip.block { background: var(--danger-soft); color: var(--danger); }
+
+    @media (hover: hover) and (pointer: fine) {
+        a.chip:hover {
+            filter: brightness(1.12);
         }
-    </style>
-<?php $glassTheme = "admin"; require __DIR__ . "/../includes/glass.php"; ?>
-</head>
-<body>
-<main class="page">
+    }
 
-    <div class="topbar">
-        <div>
-            <h1>Calendar</h1>
-            <p>Bookings per day, and dates you close for maintenance or personal use.</p>
-        </div>
-        <a href="dashboard.php">Back to Dashboard</a>
-    </div>
+    .cal-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 16px;
+        padding: 12px 16px;
+        color: var(--text-2);
+        font-size: 12px;
+    }
 
-    <?php if ($message !== ""): ?><div class="notice ok"><?= htmlspecialchars($message) ?></div><?php endif; ?>
-    <?php if ($error !== ""): ?><div class="notice warn" role="alert"><?= htmlspecialchars($error) ?></div><?php endif; ?>
+    .cal-legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+    }
 
-    <div class="layout">
+    .cal-legend .chip {
+        margin: 0;
+        padding: 3px 5px;
+    }
 
-        <section class="panel" aria-label="Month">
+    .date-pair {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 12px;
+        margin-top: 16px;
+    }
+
+    .date-pair .field + .field {
+        margin-top: 0;
+    }
+
+    .date-pair .input {
+        min-width: 0;
+    }
+
+    .blocks li {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 11px 0;
+        border-top: 1px solid var(--line);
+        font-size: 13px;
+    }
+
+    .blocks li:first-child {
+        padding-top: 0;
+        border-top: 0;
+    }
+
+    .blocks strong {
+        display: block;
+    }
+
+    .blocks small {
+        color: var(--text-3);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+    }
+
+    @media (max-width: 767px) {
+        .day {
+            min-height: 66px;
+            padding: 3px;
+        }
+
+        .day-num {
+            min-width: 22px;
+            height: 22px;
+            font-size: 11.5px;
+        }
+
+        .chip {
+            justify-content: center;
+            padding: 3px 2px;
+        }
+
+        /* on a phone a day is too narrow for names: the icon stays, the list below has the names */
+        .chip .who {
+            display: none;
+        }
+
+        .cal-bar {
+            padding: 12px;
+        }
+
+        .cal-nav strong {
+            min-width: 120px;
+            font-size: 15px;
+        }
+
+        .cal-tools,
+        .cal-tools .select {
+            flex: 1;
+        }
+    }
+</style>
+<?php admin_shell_body(); ?>
+
+<?php if ($error !== ""): ?>
+    <div class="alert alert-error alert-in" role="alert"><?= icon("alert") ?><p><?= h($error) ?></p></div>
+<?php endif; ?>
+
+<div class="grid grid-main">
+
+    <div class="col">
+
+        <!-- THE MONTH -->
+
+        <section class="card" aria-label="<?= $monthStart->format("F Y") ?>">
             <div class="cal-bar">
                 <div class="cal-nav">
-                    <a href="<?= htmlspecialchars(cal_link($prevMonth, $roomFilter)) ?>" aria-label="Previous month">‹</a>
+                    <a class="btn btn-icon" href="<?= h(cal_link($prevMonth, $roomFilter)) ?>" aria-label="Previous month" rel="prev"><?= icon("chevron-left") ?></a>
                     <strong><?= $monthStart->format("F Y") ?></strong>
-                    <a href="<?= htmlspecialchars(cal_link($nextMonth, $roomFilter)) ?>" aria-label="Next month">›</a>
+                    <a class="btn btn-icon" href="<?= h(cal_link($nextMonth, $roomFilter)) ?>" aria-label="Next month" rel="next"><?= icon("chevron-right") ?></a>
                 </div>
-                <form method="get">
-                    <input type="hidden" name="month" value="<?= htmlspecialchars($monthParam) ?>">
-                    <label for="room" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">Room</label>
-                    <select id="room" name="room" onchange="this.form.submit()" style="width:auto">
+
+                <form class="cal-tools" method="get">
+                    <?php if ($monthParam !== date("Y-m")): ?>
+                        <a class="btn btn-sm" href="<?= h(cal_link(date("Y-m"), $roomFilter)) ?>">Today</a>
+                        <input type="hidden" name="month" value="<?= h($monthParam) ?>">
+                    <?php endif; ?>
+                    <label class="sr-only" for="room">Room</label>
+                    <select class="select select-sm" id="room" name="room" onchange="this.form.submit()">
                         <option value="all">All rooms</option>
                         <?php foreach ($rooms as $room): ?>
-                            <option value="<?= (int) $room["id"] ?>"<?= $roomFilter === (int) $room["id"] ? " selected" : "" ?>><?= htmlspecialchars($room["room_name"]) ?></option>
+                            <option value="<?= (int) $room["id"] ?>"<?= $roomFilter === (int) $room["id"] ? " selected" : "" ?>><?= h($room["room_name"]) ?></option>
                         <?php endforeach; ?>
                     </select>
-                    <noscript><button type="submit">Show</button></noscript>
+                    <noscript><button class="btn btn-sm" type="submit">Show</button></noscript>
                 </form>
             </div>
 
@@ -290,21 +477,21 @@ function block_label(array $block, array $roomNames): string
                     $info = $days[$key] ?? [];
                     $closed = !empty($info["blocks"]);
                 ?>
-                    <div class="day<?= $closed ? " closed" : "" ?><?= $key === $today ? " today" : "" ?>">
-                        <span class="num"><?= (int) $d->format("j") ?></span>
+                    <div class="day<?= $closed ? " closed" : "" ?><?= $key === $today ? " today" : "" ?><?= $key < $today ? " past" : "" ?>">
+                        <span class="day-num" <?= $key === $today ? 'aria-label="Today, ' . (int) $d->format("j") . '"' : "" ?>><?= (int) $d->format("j") ?></span>
 
                         <?php foreach ($info["blocks"] ?? [] as $b): ?>
-                            <span class="chip block" title="<?= htmlspecialchars("Closed" . ($b["reason"] !== "" ? ": " . $b["reason"] : "")) ?>">
-                                <?= icon("lock") ?> <span class="who"><?= $b["reason"] !== "" ? htmlspecialchars($b["reason"]) : "Closed" ?></span>
+                            <span class="chip block" title="<?= h("Closed" . ($b["reason"] !== "" ? ": " . $b["reason"] : "")) ?>">
+                                <?= icon("lock") ?> <span class="who"><?= $b["reason"] !== "" ? h($b["reason"]) : "Closed" ?></span>
                             </span>
                         <?php endforeach; ?>
 
                         <?php foreach ($info["stays"] ?? [] as $r): ?>
-                            <a class="chip <?= htmlspecialchars($r["status"]) ?>"
-                               href="reservations.php"
-                               title="<?= htmlspecialchars($r["full_name"] . " · " . ($roomNames[$r["room_id"]] ?? "Room") . " · " . $r["check_in"] . " → " . $r["check_out"] . " · " . ucfirst($r["status"])) ?>">
-                                <?= $key === $r["check_in"] ? icon("log-in") : "" ?>
-                                <span class="who"><?= htmlspecialchars(explode(" ", trim($r["full_name"]))[0]) ?><?= $roomFilter === "all" && count($roomNames) > 1 ? " · " . htmlspecialchars($roomNames[$r["room_id"]] ?? "") : "" ?></span>
+                            <a class="chip <?= h($r["status"]) ?>"
+                               href="<?= admin_can("reservations") ? "reservations.php?q=" . (int) $r["id"] : "#stays" ?>"
+                               title="<?= h($r["full_name"] . " · " . ($roomNames[$r["room_id"]] ?? "Room") . " · " . admin_stay($r["check_in"], $r["check_out"]) . " · " . ucfirst($r["status"])) ?>">
+                                <?= icon($key === $r["check_in"] ? "log-in" : $chipIcons[$r["status"]]) ?>
+                                <span class="who"><?= h(explode(" ", trim($r["full_name"]))[0]) ?><?= $roomFilter === "all" && count($roomNames) > 1 ? " · " . h($roomNames[$r["room_id"]] ?? "") : "" ?></span>
                             </a>
                         <?php endforeach; ?>
                     </div>
@@ -315,75 +502,152 @@ function block_label(array $block, array $roomNames): string
                 <?php endfor; ?>
             </div>
 
-            <div class="legend">
-                <span><i style="background:#dcfce7"></i>Confirmed</span>
-                <span><i style="background:#fef3c7"></i>Pending payment</span>
-                <span><i style="background:#e0e7ff"></i>Completed</span>
-                <span><i style="background:#fee2e2"></i>Closed</span>
-                <span><?= icon("log-in") ?> Check-in day</span>
+            <div class="cal-legend">
+                <span><span class="chip confirmed"><?= icon("check-circle") ?></span> Confirmed</span>
+                <span><span class="chip pending"><?= icon("clock") ?></span> Pending payment</span>
+                <span><span class="chip completed"><?= icon("star") ?></span> Completed</span>
+                <span><span class="chip block"><?= icon("lock") ?></span> Closed</span>
+                <span><span class="chip confirmed"><?= icon("log-in") ?></span> Check-in day</span>
             </div>
         </section>
 
-        <aside>
-            <section class="panel panel-pad">
-                <h2>Close dates</h2>
 
-                <form method="post">
-                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrf_token()) ?>">
+        <!-- THE SAME MONTH AS A LIST -->
 
-                    <label for="room_id">Room</label>
-                    <select id="room_id" name="room_id">
-                        <option value="all">All rooms (whole property)</option>
-                        <?php foreach ($rooms as $room): ?>
-                            <option value="<?= (int) $room["id"] ?>"<?= (string) $form["room_id"] === (string) $room["id"] ? " selected" : "" ?>><?= htmlspecialchars($room["room_name"]) ?></option>
-                        <?php endforeach; ?>
-                    </select>
+        <section class="card" id="stays">
+            <div class="card-head">
+                <div>
+                    <h2 class="card-title">Stays in <?= $monthStart->format("F") ?></h2>
+                    <p class="card-sub"><?= $roomFilter === "all" ? "All rooms" : h($roomNames[$roomFilter]) ?></p>
+                </div>
+            </div>
 
-                    <div class="row2">
-                        <div>
-                            <label for="start_date">From</label>
-                            <input type="date" id="start_date" name="start_date" value="<?= htmlspecialchars($form["start_date"]) ?>" required>
-                        </div>
-                        <div>
-                            <label for="end_date">To (included)</label>
-                            <input type="date" id="end_date" name="end_date" value="<?= htmlspecialchars($form["end_date"]) ?>" required>
-                        </div>
-                    </div>
-
-                    <label for="reason">Reason <span style="font-weight:400;color:var(--muted)">(optional, only admins see it)</span></label>
-                    <input id="reason" name="reason" maxlength="150" value="<?= htmlspecialchars($form["reason"]) ?>" placeholder="e.g. Maintenance, family use">
-
-                    <button type="submit" class="btn"><?= icon("lock") ?> Close These Dates</button>
-                    <p class="hint">Guests won't be able to book the nights from the first to the last date. Existing reservations are kept.</p>
-                </form>
-            </section>
-
-            <section class="panel panel-pad" style="margin-top:18px">
-                <h2>Upcoming closed dates</h2>
-
-                <?php if (!$upcomingBlocks): ?>
-                    <p class="none">None. Every date is open for booking.</p>
-                <?php else: ?>
-                    <ul class="blocks">
-                        <?php foreach ($upcomingBlocks as $b): ?>
-                            <li>
-                                <div>
-                                    <strong><?= htmlspecialchars(block_label($b, $roomNames)) ?></strong>
-                                    <?php if ($b["reason"] !== ""): ?><small><?= htmlspecialchars($b["reason"]) ?></small><?php endif; ?>
-                                </div>
-                                <form method="post" onsubmit="return confirm('Open these dates for booking again?');">
-                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrf_token()) ?>">
-                                    <input type="hidden" name="delete_block" value="<?= (int) $b["id"] ?>">
-                                    <button type="submit" class="remove">Remove</button>
-                                </form>
-                            </li>
-                        <?php endforeach; ?>
-                    </ul>
-                <?php endif; ?>
-            </section>
-        </aside>
+            <?php if ($reservations): ?>
+                <div class="table-wrap">
+                    <table class="table table-stack">
+                        <thead>
+                            <tr>
+                                <th>Guest</th>
+                                <th>Room</th>
+                                <th>Stay</th>
+                                <th class="right hide-narrow">Guests</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($reservations as $r): ?>
+                                <tr>
+                                    <td class="cell-lead">
+                                        <div class="person">
+                                            <?= admin_avatar($r, 32) ?>
+                                            <div class="person-text">
+                                                <?php if (admin_can("reservations")): ?>
+                                                    <a class="person-name" href="reservations.php?q=<?= (int) $r["id"] ?>"><?= h($r["full_name"]) ?></a>
+                                                <?php else: ?>
+                                                    <span class="person-name"><?= h($r["full_name"]) ?></span>
+                                                <?php endif; ?>
+                                                <span class="person-sub">Reservation #<?= (int) $r["id"] ?></span>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td data-label="Room" class="cell-clip"><?= h($roomNames[$r["room_id"]] ?? "Room") ?></td>
+                                    <td data-label="Stay" class="nowrap"><?= h(admin_stay($r["check_in"], $r["check_out"])) ?></td>
+                                    <td data-label="Guests" class="right num hide-narrow"><?= (int) $r["guests"] ?></td>
+                                    <td data-label="Status"><?= status_pill($r["status"]) ?></td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            <?php else: ?>
+                <div class="empty empty-sm">
+                    <div class="empty-icon"><?= icon("calendar", 20) ?></div>
+                    <p>No stays in <?= $monthStart->format("F Y") ?><?= $roomFilter === "all" ? "" : " for this room" ?>.</p>
+                </div>
+            <?php endif; ?>
+        </section>
 
     </div>
-</main>
-</body>
-</html>
+
+
+    <div class="col">
+
+        <!-- CLOSE DATES -->
+
+        <section class="card card-pad">
+            <h2 class="card-title">Close dates</h2>
+            <p class="card-sub">For repairs, cleaning or your own use</p>
+
+            <form method="post" action="<?= h(cal_link($monthParam, $roomFilter)) ?>" style="margin-top:16px">
+                <?= csrf_field() ?>
+
+                <label class="field">
+                    <span class="label">Room</span>
+                    <select class="select" name="room_id">
+                        <option value="all">All rooms (whole property)</option>
+                        <?php foreach ($rooms as $room): ?>
+                            <option value="<?= (int) $room["id"] ?>"<?= (string) $form["room_id"] === (string) $room["id"] ? " selected" : "" ?>><?= h($room["room_name"]) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+
+                <div class="date-pair">
+                    <label class="field">
+                        <span class="label">From</span>
+                        <input class="input" type="date" name="start_date" value="<?= h($form["start_date"]) ?>" required>
+                    </label>
+                    <label class="field">
+                        <span class="label">To (included)</span>
+                        <input class="input" type="date" name="end_date" value="<?= h($form["end_date"]) ?>" required>
+                    </label>
+                </div>
+
+                <label class="field" style="margin-top:16px">
+                    <span class="label">Reason <span class="muted" style="font-weight:400">(optional, only admins see it)</span></span>
+                    <input class="input" name="reason" maxlength="150" value="<?= h($form["reason"]) ?>" placeholder="e.g. Maintenance, family use">
+                </label>
+
+                <div class="form-actions">
+                    <button class="btn btn-danger btn-block" type="submit"><?= icon("lock") ?> Close these dates</button>
+                </div>
+
+                <p class="hint">Guests won't be able to book the nights from the first to the last date. Existing reservations are kept.</p>
+            </form>
+        </section>
+
+
+        <!-- CLOSED DATES STILL TO COME -->
+
+        <section class="card card-pad">
+            <h2 class="card-title" style="margin-bottom:14px">Upcoming closed dates</h2>
+
+            <?php if (!$upcomingBlocks): ?>
+                <p class="muted" style="font-size:13px">None. Every date is open for booking.</p>
+            <?php else: ?>
+                <ul class="blocks">
+                    <?php foreach ($upcomingBlocks as $b): ?>
+                        <li>
+                            <div>
+                                <strong><?= h(block_label($b, $roomNames)) ?></strong>
+                                <?php if ($b["reason"] !== ""): ?><small><?= h($b["reason"]) ?></small><?php endif; ?>
+                            </div>
+                            <form class="inline-form" method="post" action="<?= h(cal_link($monthParam, $roomFilter)) ?>"
+                                data-confirm="<?= h(block_label($b, $roomNames)) ?> will be open for booking again."
+                                data-confirm-title="Open these dates again?"
+                                data-confirm-ok="Open the dates"
+                            >
+                                <?= csrf_field() ?>
+                                <input type="hidden" name="delete_block" value="<?= (int) $b["id"] ?>">
+                                <button class="btn btn-sm" type="submit">Open</button>
+                            </form>
+                        </li>
+                    <?php endforeach; ?>
+                </ul>
+            <?php endif; ?>
+        </section>
+
+    </div>
+
+</div>
+
+<?php admin_shell_end(); ?>

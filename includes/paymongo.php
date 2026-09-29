@@ -269,12 +269,18 @@ function paymongo_settle(PDO $pdo, array $payment, bool $cancelIfUnpaid = false)
             );
             $update->execute([$method, $session["payment_ref"] ?: $payment["checkout_session_id"], $payment["id"]]);
 
-            if ($update->rowCount() > 0) {
+            $settled = $update->rowCount() > 0;
+
+            if ($settled) {
                 $pdo->prepare("UPDATE reservations SET status = 'confirmed' WHERE id = ? AND status = 'pending'")
                     ->execute([$payment["reservation_id"]]);
             }
 
             $pdo->commit();
+
+            if ($settled) {
+                paymongo_log($pdo, $payment, "payment.online_paid", $method);
+            }
         } catch (Throwable $e) {
             $pdo->rollBack();
             error_log("PayMongo settle failed for payment #{$payment["id"]}: " . $e->getMessage());
@@ -295,13 +301,52 @@ function paymongo_settle(PDO $pdo, array $payment, bool $cancelIfUnpaid = false)
             }
         }
 
-        $pdo->prepare("UPDATE payments SET status = 'cancelled' WHERE id = ? AND status = 'pending'")
-            ->execute([$payment["id"]]);
+        $cancel = $pdo->prepare("UPDATE payments SET status = 'cancelled' WHERE id = ? AND status = 'pending'");
+        $cancel->execute([$payment["id"]]);
+
+        if ($cancel->rowCount() > 0) {
+            paymongo_log($pdo, $payment, "payment.online_cancelled");
+        }
 
         return "cancelled";
     }
 
     return "pending";
+}
+
+/*
+ * Writes an online payment into the activity log (includes/activity.php). The payment is the
+ * customer's doing even when it is settled while an admin is looking at the payments page, so
+ * the customer is named as the one who did it, never the person logged in.
+ */
+function paymongo_log(PDO $pdo, array $payment, string $type, string $method = "online"): void
+{
+    try {
+        require_once __DIR__ . "/activity.php";
+
+        $stmt = $pdo->prepare("SELECT full_name FROM users WHERE id = ?");
+        $stmt->execute([$payment["user_id"]]);
+        $name = (string) ($stmt->fetchColumn() ?: "A customer");
+
+        $reservation = (int) $payment["reservation_id"];
+
+        $summary = $type === "payment.online_paid"
+            ? $name . " paid ₱" . number_format((float) $payment["amount"], 2) . " online ("
+                . str_replace("Online · ", "", payment_method_label($method)) . ") for reservation #" . $reservation
+            : "Online payment for reservation #" . $reservation . " was not completed";
+
+        log_activity($pdo, $type, $summary, [
+            "actor_id" => (int) $payment["user_id"],
+            "actor_role" => "customer",
+            "actor_name" => $name,
+            "entity_type" => "payment",
+            "entity_id" => (int) $payment["id"],
+            "link" => "payment.php?q=%23" . $reservation,
+            "notify" => $type === "payment.online_paid",
+        ]);
+    } catch (Throwable $e) {
+        error_log("PayMongo activity log failed: " . $e->getMessage());
+    }
 }
 
 // Settles every pending online payment of one customer (or of everyone, for the admin page).

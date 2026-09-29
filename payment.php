@@ -5,6 +5,7 @@ session_start();
 require_once __DIR__ . "/config/database.php";
 require_once __DIR__ . "/includes/icons.php";
 require_once __DIR__ . "/includes/paymongo.php";
+require_once __DIR__ . "/includes/activity.php";
 
 ensure_paymongo_schema($pdo);
 
@@ -377,6 +378,21 @@ if (
                         ? $reference_number
                         : null
                 ]);
+
+                // shows up in the admin's notifications and activity log
+                log_activity(
+                    $pdo,
+                    "payment.submitted",
+                    ($_SESSION["full_name"] ?? "A customer") . " sent a payment of ₱"
+                        . number_format((float) $currentReservation["total_amount"], 2)
+                        . " (" . payment_method_label($payment_method) . ") for reservation #" . $reservation_id,
+                    [
+                        "entity_type" => "payment",
+                        "entity_id" => (int) $pdo->lastInsertId(),
+                        "link" => "payment.php?status=pending",
+                        "notify" => true,
+                    ]
+                );
 
 
                 header(

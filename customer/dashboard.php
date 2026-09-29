@@ -6,6 +6,7 @@ require_once __DIR__ . "/../config/database.php";
 require_once __DIR__ . "/../includes/icons.php";
 require_once __DIR__ . "/../includes/chat.php";
 require_once __DIR__ . "/../includes/paymongo.php";
+require_once __DIR__ . "/../includes/activity.php";
 
 ensure_chat_schema($pdo);
 $inboxUnread = chat_unread_for_customer($pdo, (int) ($_SESSION["user_id"] ?? 0));
@@ -93,6 +94,36 @@ if (
             $reservation_id,
             $user_id
         ]);
+
+        // shows up in the admin's notifications and activity log
+        if ($stmt->rowCount() > 0) {
+
+            $cancelled = $pdo->prepare("
+                SELECT rooms.room_name, reservations.check_in, reservations.check_out
+                FROM reservations
+                INNER JOIN rooms ON rooms.id = reservations.room_id
+                WHERE reservations.id = ?
+            ");
+
+            $cancelled->execute([$reservation_id]);
+            $cancelled = $cancelled->fetch();
+
+            log_activity(
+                $pdo,
+                "reservation.cancelled",
+                ($_SESSION["full_name"] ?? "A customer") . " cancelled reservation #" . $reservation_id
+                    . ($cancelled
+                        ? " (" . $cancelled["room_name"] . ", " . date("M j", strtotime($cancelled["check_in"]))
+                            . " to " . date("M j", strtotime($cancelled["check_out"])) . ")"
+                        : ""),
+                [
+                    "entity_type" => "reservation",
+                    "entity_id" => $reservation_id,
+                    "link" => "reservations.php?q=" . $reservation_id,
+                    "notify" => true,
+                ]
+            );
+        }
     }
 
 

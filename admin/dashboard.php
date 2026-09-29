@@ -2,2440 +2,635 @@
 session_start();
 
 require_once __DIR__ . "/../config/database.php";
-require_once __DIR__ . "/../includes/icons.php";
-require_once __DIR__ . "/../includes/chat.php";
+require_once __DIR__ . "/../includes/admin-shell.php";
+require_once __DIR__ . "/../includes/analytics.php";
 
-ensure_chat_schema($pdo);
-$chatUnread = chat_unread_for_admins($pdo);
+$admin = admin_boot($pdo);
 
 
 // ======================================================
-// ADMIN LOGIN CHECK
+// THE PERIOD: ?range=7 | 30 | 90 | 365 (see ANALYTICS_RANGES)
+// Every number on the page is for the chosen period and is compared with the same number
+// of days just before it.
 // ======================================================
 
-if (
-    !isset($_SESSION["user_id"]) ||
-    ($_SESSION["role"] ?? "") !== "admin"
-) {
-    header("Location: ../login.php");
-    exit;
+$periods = [
+    "7" => ["name" => "Weekly", "unit" => "/week"],
+    "30" => ["name" => "Monthly", "unit" => "/month"],
+    "90" => ["name" => "Quarterly", "unit" => "/quarter"],
+    "365" => ["name" => "Yearly", "unit" => "/year"],
+];
+
+$range = (string) ($_GET["range"] ?? "30");
+
+if (!isset($periods[$range])) {
+    $range = "30";
+}
+
+$settings = ANALYTICS_RANGES[$range];
+$window = analytics_range_window($range);
+$unit = $periods[$range]["unit"];
+$versus = "vs previous " . $settings["short"];
+
+$now = analytics_totals($pdo, $window);
+$before = analytics_totals($pdo, analytics_range_window($range, 1));
+$shares = analytics_shares($pdo, $window);
+
+$totalCustomers = (int) $pdo->query("SELECT COUNT(*) FROM users WHERE role = 'customer'")->fetchColumn();
+$occupancyChange = $now["occupancy"] - $before["occupancy"];
+
+$revenue = analytics_series($pdo, "revenue", $window, $settings["bucket"]);
+$revenueChange = stat_change($now["revenue"], $before["revenue"]);
+
+$bucketName = ["day" => "day", "week" => "week", "month" => "month"][$settings["bucket"]];
+
+
+// ======================================================
+// WAITING FOR AN ADMIN (on phones: the quick actions)
+// Each one: how many, the name, the short name for a phone, icon, color, where it goes.
+// ======================================================
+
+$counts = admin_counts($pdo);
+
+$arrivalsToday = (int) $pdo->query(
+    "SELECT COUNT(*) FROM reservations WHERE status = 'confirmed' AND check_in = CURDATE()"
+)->fetchColumn();
+
+$todo = [];
+
+if (admin_can("reservations")) {
+    $todo[] = [$counts["pending_reservations"], "Pending reservations", "Pending", "clock", "amber", "reservations.php?status=pending"];
+}
+
+if (admin_can("payments")) {
+    $todo[] = [$counts["payments_to_verify"], "Payments to verify", "Verify", "banknote", "green", "payment.php?status=pending"];
+}
+
+if (admin_can("messages")) {
+    $todo[] = [$counts["unread_messages"], "Unread messages", "Messages", "message", "cyan", "messages.php"];
+}
+
+if (admin_can("reservations")) {
+    $todo[] = [$arrivalsToday, "Arrivals today", "Arrivals", "log-in", "violet", "reservations.php?status=confirmed"];
+}
+
+// on a phone one tile stands out: the first one with something waiting
+$featured = 0;
+
+foreach ($todo as $index => $item) {
+    if ($item[0] > 0) {
+        $featured = $index;
+        break;
+    }
 }
 
 
 // ======================================================
-// DASHBOARD COUNTS
+// LISTS
 // ======================================================
 
-// Total customers
-$stmt = $pdo->query("
-    SELECT COUNT(*)
-    FROM users
-    WHERE role = 'customer'
-");
-$totalCustomers = (int) $stmt->fetchColumn();
-
-
-// Total rooms
-$stmt = $pdo->query("
-    SELECT COUNT(*)
-    FROM rooms
-");
-$totalRooms = (int) $stmt->fetchColumn();
-
-
-// Total reservations
-$stmt = $pdo->query("
-    SELECT COUNT(*)
-    FROM reservations
-");
-$totalReservations = (int) $stmt->fetchColumn();
-
-
-// Pending reservations
-$stmt = $pdo->query("
-    SELECT COUNT(*)
-    FROM reservations
-    WHERE status = 'pending'
-");
-$pendingReservations = (int) $stmt->fetchColumn();
-
-
-// Confirmed reservations
-$stmt = $pdo->query("
-    SELECT COUNT(*)
-    FROM reservations
-    WHERE status = 'confirmed'
-");
-$confirmedReservations = (int) $stmt->fetchColumn();
-
-
-// Verified payments
-$stmt = $pdo->query("
-    SELECT COUNT(*)
-    FROM payments
-    WHERE status = 'verified'
-");
-$verifiedPayments = (int) $stmt->fetchColumn();
-
-
-// Total verified payment amount
-$stmt = $pdo->query("
-    SELECT COALESCE(SUM(amount), 0)
-    FROM payments
-    WHERE status = 'verified'
-");
-$totalRevenue = (float) $stmt->fetchColumn();
-
-
-// ======================================================
-// RECENT RESERVATIONS
-// ======================================================
-
-$stmt = $pdo->query("
-    SELECT
+$recentReservations = $pdo->query(
+    "SELECT
         reservations.id,
         reservations.check_in,
         reservations.check_out,
-        reservations.guests,
         reservations.total_amount,
+        reservations.total_nights,
         reservations.status,
         reservations.created_at,
-
         rooms.room_name,
-
-        users.full_name AS customer_name,
-        users.email AS customer_email,
+        users.full_name,
+        users.email,
         users.profile_image
+     FROM reservations
+     INNER JOIN rooms ON reservations.room_id = rooms.id
+     INNER JOIN users ON reservations.user_id = users.id
+     ORDER BY reservations.created_at DESC
+     LIMIT 6"
+)->fetchAll();
 
-    FROM reservations
+$notifications = admin_notifications($pdo, 4);
+$guestActivity = activity_recent($pdo, 5, ["not_actor_role" => "admin"]);
+$adminActivity = admin_can("activity") ? activity_recent($pdo, 5, ["actor_role" => "admin"]) : [];
 
-    INNER JOIN rooms
-        ON reservations.room_id = rooms.id
+// the full log has its own page; until that page exists the "View all" links stay hidden
+$activityPage = admin_can("activity") && is_file(__DIR__ . "/activity.php");
 
-    INNER JOIN users
-        ON reservations.user_id = users.id
-
-    ORDER BY reservations.created_at DESC
-
-    LIMIT 8
-");
-
-$recentReservations = $stmt->fetchAll();
-
-
-// ======================================================
-// ADMIN INFORMATION
-// ======================================================
-
-$stmt = $pdo->prepare("
-    SELECT *
-    FROM users
-    WHERE id = ?
-    LIMIT 1
-");
-
-$stmt->execute([
-    $_SESSION["user_id"]
+admin_shell_head([
+    "title" => "Dashboard",
+    "subtitle" => "Welcome back, " . $admin["full_name"],
+    "active" => "dashboard",
+    "mobile_title" => false,    // on phones the title shares its row with the period
 ]);
-
-$admin = $stmt->fetch();
 ?>
-
-<!DOCTYPE html>
-<html lang="en">
-
-<head>
-
-    <meta charset="UTF-8">
-
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0, viewport-fit=cover"
-    >
-
-    <meta
-        name="theme-color"
-        content="#ffffff"
-    >
-
-    <title>
-        Admin Dashboard | ARVE'S House
-    </title>
-
-
-    <style>
-
-        /* ==================================================
-           MOTION TOKENS
-        ================================================== */
-
-        :root {
-
-            --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
-
-            --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
-
-            --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
-        }
-
-
-        /* ==================================================
-           RESET
-        ================================================== */
-
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        html {
-            scroll-behavior: smooth;
-
-            -webkit-tap-highlight-color: transparent;
-
-            -webkit-text-size-adjust: 100%;
-            text-size-adjust: 100%;
-        }
-
-        body {
-            font-family:
-                Inter,
-                Arial,
-                Helvetica,
-                sans-serif;
-
-            background: #f3f5f9;
-
-            color: #111827;
-
-            min-height: 100vh;
-            min-height: 100svh;
-        }
-
-
-        /* Controls: no double-tap zoom delay, no long-press text selection */
-
-        a,
-        button {
-            touch-action: manipulation;
-        }
-
-        button,
-        .menu-item,
-        .logout-button,
-        .view-site,
-        .quick-card {
-            -webkit-user-select: none;
-            user-select: none;
-        }
-
-
-        /* ==================================================
-           SIDEBAR
-        ================================================== */
-
-        .sidebar {
-
-            position: fixed;
-
-            top: 0;
-            left: 0;
-
-            width: 270px;
-            height: 100vh;
-            height: 100dvh;
-
-            /* keep logo/logout clear of the notch & home indicator */
-            padding-top: env(safe-area-inset-top, 0px);
-            padding-bottom: env(safe-area-inset-bottom, 0px);
-            padding-left: env(safe-area-inset-left, 0px);
-
-            background:
-                linear-gradient(
-                    180deg,
-                    #111827,
-                    #172033
-                );
-
-            color: white;
-
-            display: flex;
-            flex-direction: column;
-
-            z-index: 1000;
-
-            box-shadow:
-                10px 0 30px
-                rgba(0,0,0,0.08);
-        }
-
-
-        .sidebar-logo {
-
-            height: 90px;
-
-            display: flex;
-            align-items: center;
-
-            padding: 0 28px;
-
-            border-bottom:
-                1px solid
-                rgba(255,255,255,0.08);
-        }
-
-
-        .logo-icon {
-
-            width: 46px;
-            height: 46px;
-
-            border-radius: 14px;
-
-            display: flex;
-            align-items: center;
-            justify-content: center;
-
-            background: #f59e0b;
-
-            color: #111827;
-
-            font-size: 22px;
-
-            margin-right: 12px;
-        }
-
-
-        .logo-text h2 {
-
-            font-size: 18px;
-
-            margin-bottom: 2px;
-        }
-
-
-        .logo-text span {
-
-            font-size: 11px;
-
-            color: #9ca3af;
-
-            text-transform: uppercase;
-
-            letter-spacing: 1.5px;
-        }
-
-
-        .sidebar-menu {
-
-            padding: 25px 18px;
-
-            flex: 1;
-
-            overflow-y: auto;
-
-            overscroll-behavior: contain;
-        }
-
-
-        .menu-title {
-
-            color: #6b7280;
-
-            font-size: 11px;
-
-            font-weight: bold;
-
-            text-transform: uppercase;
-
-            letter-spacing: 1.5px;
-
-            padding: 0 14px;
-
-            margin:
-                15px 0
-                10px;
-        }
-
-
-        .menu-item {
-
-            display: flex;
-
-            align-items: center;
-
-            gap: 13px;
-
-            color: #cbd5e1;
-
-            text-decoration: none;
-
-            padding: 14px 16px;
-
-            border-radius: 12px;
-
-            margin-bottom: 7px;
-
-            transition:
-                transform 140ms var(--ease-out),
-                background-color 180ms ease,
-                color 180ms ease;
-
-            font-size: 14px;
-        }
-
-
-        .menu-item:active {
-
-            transform:
-                scale(0.98);
-        }
-
-
-        @media (hover: hover) and (pointer: fine) {
-
-            .menu-item:hover {
-
-                background:
-                    rgba(255,255,255,0.08);
-
-                color: white;
-
-                transform:
-                    translateX(3px);
-            }
-
-
-            .menu-item:hover:active {
-
-                transform:
-                    translateX(3px)
-                    scale(0.98);
-            }
-        }
-
-
-        .menu-item:focus-visible {
-
-            background:
-                rgba(255,255,255,0.08);
-
-            color: white;
-        }
-
-
-        .menu-item.active {
-
-            background: #f59e0b;
-
-            color: #111827;
-
-            font-weight: bold;
-        }
-
-
-        .menu-icon {
-
-            width: 28px;
-
-            text-align: center;
-
-            font-size: 18px;
-        }
-
-
-        .sidebar-footer {
-
-            padding: 20px;
-
-            border-top:
-                1px solid
-                rgba(255,255,255,0.08);
-        }
-
-
-        .logout-button {
-
-            width: 100%;
-
-            padding: 13px;
-
-            border-radius: 10px;
-
-            border:
-                1px solid
-                rgba(255,255,255,0.1);
-
-            color: #fca5a5;
-
-            text-decoration: none;
-
-            display: block;
-
-            text-align: center;
-
-            transition:
-                transform 140ms var(--ease-out),
-                background-color 180ms ease,
-                color 180ms ease;
-        }
-
-
-        .logout-button:active {
-
-            transform:
-                scale(0.97);
-        }
-
-
-        @media (hover: hover) and (pointer: fine) {
-
-            .logout-button:hover {
-
-                background: #dc2626;
-
-                color: white;
-            }
-        }
-
-
-        .logout-button:focus-visible {
-
-            background: #dc2626;
-
-            color: white;
-        }
-
-
-        /* ==================================================
-           MAIN AREA
-        ================================================== */
-
-        .main {
-
-            margin-left: 270px;
-
-            min-height: 100vh;
-            min-height: 100svh;
-
-            /* landscape notch (viewport-fit=cover) */
-            padding-right: env(safe-area-inset-right, 0px);
-        }
-
-
-        /* ==================================================
-           TOPBAR
-        ================================================== */
-
-        .topbar {
-
-            height: 90px;
-            height: calc(90px + env(safe-area-inset-top, 0px));
-
-            padding: 0 35px;
-            padding-top: env(safe-area-inset-top, 0px);
-
-            background: white;
-
-            display: flex;
-
-            align-items: center;
-
-            justify-content: space-between;
-
-            border-bottom:
-                1px solid #e5e7eb;
-
-            position: sticky;
-
-            top: 0;
-
-            z-index: 900;
-        }
-
-
-        .topbar-left h1 {
-
-            font-size: 22px;
-
-            margin-bottom: 4px;
-        }
-
-
-        .topbar-left p {
-
-            font-size: 13px;
-
-            color: #6b7280;
-        }
-
-
-        .topbar-right {
-
-            display: flex;
-
-            align-items: center;
-
-            gap: 18px;
-        }
-
-
-        .view-site {
-
-            padding: 10px 16px;
-
-            border-radius: 9px;
-
-            background: #f3f4f6;
-
-            color: #374151;
-
-            text-decoration: none;
-
-            font-size: 13px;
-
-            font-weight: 600;
-
-            transition:
-                transform 140ms var(--ease-out),
-                background-color 180ms ease;
-        }
-
-
-        .view-site:active {
-
-            transform:
-                scale(0.97);
-        }
-
-
-        @media (hover: hover) and (pointer: fine) {
-
-            .view-site:hover {
-
-                background: #e5e7eb;
-            }
-        }
-
-
-        .view-site:focus-visible {
-
-            background: #e5e7eb;
-        }
-
-
-        .admin-profile {
-
-            display: flex;
-
-            align-items: center;
-
-            gap: 10px;
-
-            padding-left: 18px;
-
-            border-left:
-                1px solid #e5e7eb;
-        }
-
-
-        .admin-avatar {
-
-            width: 43px;
-            height: 43px;
-
-            border-radius: 50%;
-
-            object-fit: cover;
-
-            background: #111827;
-
-            color: white;
-
-            display: flex;
-
-            align-items: center;
-
-            justify-content: center;
-
-            font-weight: bold;
-        }
-
-
-        .admin-info strong {
-
-            display: block;
-
-            font-size: 13px;
-        }
-
-
-        .admin-info span {
-
-            font-size: 11px;
-
-            color: #9ca3af;
-        }
-
-
-        /* ==================================================
-           CONTENT
-        ================================================== */
-
-        .content {
-
-            padding: 35px;
-        }
-
-
-        /* ==================================================
-           WELCOME
-        ================================================== */
-
-        .welcome {
-
-            position: relative;
-
-            overflow: hidden;
-
-            background:
-                linear-gradient(
-                    135deg,
-                    #111827,
-                    #1f2937
-                );
-
-            color: white;
-
-            padding: 35px;
-
-            border-radius: 22px;
-
-            margin-bottom: 30px;
-        }
-
-
-        .welcome::after {
-
-            content: "";
-
-            position: absolute;
-
-            width: 300px;
-            height: 300px;
-
-            border-radius: 50%;
-
-            background:
-                rgba(245,158,11,0.12);
-
-            right: -100px;
-
-            top: -120px;
-        }
-
-
-        .welcome h2 {
-
-            font-size: 27px;
-
-            margin-bottom: 9px;
-
-            position: relative;
-
-            z-index: 1;
-        }
-
-
-        .welcome p {
-
-            color: #d1d5db;
-
-            position: relative;
-
-            z-index: 1;
-
-            max-width: 650px;
-
-            line-height: 1.6;
-        }
-
-
-        /* ==================================================
-           STATS
-        ================================================== */
-
-        .stats-grid {
-
-            display: grid;
-
-            grid-template-columns:
-                repeat(4, minmax(0, 1fr));
-
-            gap: 20px;
-
-            margin-bottom: 30px;
-        }
-
-
-        .stat-card {
-
-            background: white;
-
-            border-radius: 18px;
-
-            padding: 23px;
-
-            box-shadow:
-                0 8px 25px
-                rgba(17,24,39,0.05);
-
-            border:
-                1px solid #eef0f4;
-
-            transition:
-                transform 180ms var(--ease-out),
-                box-shadow 180ms ease;
-        }
-
-
-        @media (hover: hover) and (pointer: fine) {
-
-            .stat-card:hover {
-
-                transform:
-                    translateY(-4px);
-
-                box-shadow:
-                    0 15px 35px
-                    rgba(17,24,39,0.09);
-            }
-        }
-
-
-        .stat-top {
-
-            display: flex;
-
-            justify-content: space-between;
-
-            align-items: center;
-
-            margin-bottom: 17px;
-        }
-
-
-        .stat-icon {
-
-            width: 48px;
-            height: 48px;
-
-            display: flex;
-
-            align-items: center;
-
-            justify-content: center;
-
-            border-radius: 14px;
-
-            font-size: 21px;
-
-            background: #f3f4f6;
-        }
-
-
-        .stat-card h3 {
-
-            font-size: 29px;
-
-            margin-bottom: 5px;
-        }
-
-
-        .stat-card p {
-
-            color: #6b7280;
-
-            font-size: 13px;
-        }
-
-
-        .stat-note {
-
-            font-size: 11px;
-
-            color: #9ca3af;
-
-            margin-top: 10px;
-        }
-
-
-        /* ==================================================
-           QUICK ACTIONS
-        ================================================== */
-
-        .section-header {
-
-            display: flex;
-
-            justify-content: space-between;
-
-            align-items: center;
-
-            margin-bottom: 18px;
-        }
-
-
-        .section-header h2 {
-
-            font-size: 19px;
-        }
-
-
-        .section-header a {
-
-            color: #2563eb;
-
-            text-decoration: none;
-
-            font-size: 13px;
-
-            font-weight: 600;
-        }
-
-
-        .quick-grid {
-
-            display: grid;
-
-            grid-template-columns:
-                repeat(4, 1fr);
-
-            gap: 18px;
-
-            margin-bottom: 35px;
-        }
-
-
-        .quick-card {
-
-            background: white;
-
-            text-decoration: none;
-
-            color: #111827;
-
-            padding: 22px;
-
-            border-radius: 17px;
-
-            border:
-                1px solid #e5e7eb;
-
-            display: flex;
-
-            align-items: center;
-
-            gap: 15px;
-
-            transition:
-                transform 140ms var(--ease-out),
-                border-color 180ms ease,
-                box-shadow 180ms ease;
-        }
-
-
-        .quick-card:active {
-
-            transform:
-                scale(0.99);
-        }
-
-
-        @media (hover: hover) and (pointer: fine) {
-
-            .quick-card:hover {
-
-                transform:
-                    translateY(-3px);
-
-                border-color: #f59e0b;
-
-                box-shadow:
-                    0 12px 30px
-                    rgba(0,0,0,0.06);
-            }
-
-
-            /* press settles the lifted card back down */
-            .quick-card:hover:active {
-
-                transform:
-                    translateY(0)
-                    scale(0.99);
-            }
-        }
-
-
-        /* keyboard parity: same highlight, no lift */
-        .quick-card:focus-visible {
-
-            border-color: #f59e0b;
-
-            box-shadow:
-                0 12px 30px
-                rgba(0,0,0,0.06);
-        }
-
-
-        .quick-icon {
-
-            width: 50px;
-            height: 50px;
-
-            border-radius: 14px;
-
-            background: #fff7ed;
-
-            display: flex;
-
-            justify-content: center;
-
-            align-items: center;
-
-            font-size: 22px;
-        }
-
-
-        .quick-card strong {
-
-            display: block;
-
-            margin-bottom: 5px;
-        }
-
-
-        .quick-card span {
-
-            font-size: 12px;
-
-            color: #6b7280;
-        }
-
-
-        /* ==================================================
-           TABLE
-        ================================================== */
-
-        .table-card {
-
-            background: white;
-
-            border-radius: 20px;
-
-            border:
-                1px solid #e5e7eb;
-
-            overflow: hidden;
-
-            box-shadow:
-                0 8px 25px
-                rgba(17,24,39,0.04);
-        }
-
-
-        .table-header {
-
-            padding: 22px 25px;
-
-            display: flex;
-
-            align-items: center;
-
-            justify-content: space-between;
-
-            border-bottom:
-                1px solid #e5e7eb;
-        }
-
-
-        .table-header h2 {
-
-            font-size: 18px;
-        }
-
-
-        .table-header a {
-
-            text-decoration: none;
-
-            color: #2563eb;
-
-            font-size: 13px;
-
-            font-weight: bold;
-        }
-
-
-        .table-wrapper {
-
-            overflow-x: auto;
-
-            overscroll-behavior-x: contain;
-        }
-
-
-        table {
-
-            width: 100%;
-
-            border-collapse: collapse;
-
-            min-width: 950px;
-        }
-
-
-        thead {
-
-            background: #f9fafb;
-        }
-
-
-        th {
-
-            padding: 14px 20px;
-
-            text-align: left;
-
-            font-size: 11px;
-
-            text-transform: uppercase;
-
-            letter-spacing: 0.5px;
-
-            color: #6b7280;
-        }
-
-
-        td {
-
-            padding: 17px 20px;
-
-            border-top:
-                1px solid #f0f1f3;
-
-            font-size: 13px;
-
-            vertical-align: middle;
-        }
-
-
-        @media (hover: hover) and (pointer: fine) {
-
-            tbody tr:hover {
-
-                background: #fafafa;
-            }
-        }
-
-
-        /* CUSTOMER */
-
-        .customer-info {
-
-            display: flex;
-
-            align-items: center;
-
-            gap: 11px;
-        }
-
-
-        .customer-picture {
-
-            width: 40px;
-            height: 40px;
-
-            border-radius: 50%;
-
-            object-fit: cover;
-
-            background: #e5e7eb;
-        }
-
-
-        .customer-placeholder {
-
-            width: 40px;
-            height: 40px;
-
-            border-radius: 50%;
-
-            background: #e5e7eb;
-
-            display: flex;
-
-            align-items: center;
-
-            justify-content: center;
-        }
-
-
-        .customer-name {
-
-            font-weight: 600;
-
-            margin-bottom: 3px;
-        }
-
-
-        .customer-email {
-
-            font-size: 11px;
-
-            color: #9ca3af;
-        }
-
-
-        /* STATUS BADGES */
-
-        .status {
-
-            display: inline-block;
-
-            padding: 6px 11px;
-
-            border-radius: 20px;
-
-            font-size: 11px;
-
-            font-weight: bold;
-        }
-
-
-        .pending {
-
-            background: #fef3c7;
-
-            color: #92400e;
-        }
-
-
-        .confirmed {
-
-            background: #d1fae5;
-
-            color: #065f46;
-        }
-
-
-        .declined {
-
-            background: #fee2e2;
-
-            color: #991b1b;
-        }
-
-
-        .cancelled {
-
-            background: #e5e7eb;
-
-            color: #374151;
-        }
-
-
-        .completed {
-
-            background: #dbeafe;
-
-            color: #1e40af;
-        }
-
-
-        .amount {
-
-            font-weight: bold;
-        }
-
-
-        .empty {
-
-            padding: 50px;
-
-            text-align: center;
-
-            color: #6b7280;
-        }
-
-
-        /* ==================================================
-           MOBILE MENU BUTTON
-        ================================================== */
-
-        .mobile-toggle {
-
-            display: none;
-
-            border: none;
-
-            background: #111827;
-
-            color: white;
-
-            border-radius: 8px;
-
-            padding: 9px 12px;
-
-            font-size: 18px;
-
-            cursor: pointer;
-
-            transition:
-                transform 140ms var(--ease-out);
-        }
-
-
-        .mobile-toggle:active:not(:disabled) {
-
-            transform:
-                scale(0.97);
-        }
-
-
-        /* ==================================================
-           RESPONSIVE
-        ================================================== */
-
-        @media (max-width: 1200px) {
-
-            .stats-grid {
-
-                grid-template-columns:
-                    repeat(2, 1fr);
-            }
-
-
-            .quick-grid {
-
-                grid-template-columns:
-                    repeat(2, 1fr);
-            }
-        }
-
-
-        @media (max-width: 850px) {
-
-            .sidebar {
-
-                transform:
-                    translateX(-100%);
-
-                transition:
-                    transform 280ms var(--ease-drawer);
-            }
-
-
-            .sidebar.show {
-
-                transform:
-                    translateX(0);
-            }
-
-
-            .main {
-
-                margin-left: 0;
-
-                padding-left: env(safe-area-inset-left, 0px);
-            }
-
-
-            .mobile-toggle {
-
-                display: block;
-            }
-
-
-            .topbar {
-
-                padding: 0 20px;
-                padding-top: env(safe-area-inset-top, 0px);
-            }
-
-
-            .content {
-
-                padding: 20px;
-            }
-
-
-            .topbar-left p {
-
-                display: none;
-            }
-
-
-            .view-site {
-
-                display: none;
-            }
-
-
-            .admin-info {
-
-                display: none;
-            }
-        }
-
-
-        @media (max-width: 600px) {
-
-            .stats-grid,
-            .quick-grid {
-
-                grid-template-columns: 1fr;
-            }
-
-
-            .welcome {
-
-                padding: 25px;
-            }
-
-
-            .welcome h2 {
-
-                font-size: 22px;
-            }
-
-
-            .content {
-
-                padding: 15px;
-            }
-
-
-            .topbar {
-
-                height: 75px;
-                height: calc(75px + env(safe-area-inset-top, 0px));
-            }
-        }
-
-
-        /* ==================================================
-           REDUCED MOTION
-        ================================================== */
-
-        @media (prefers-reduced-motion: reduce) {
-
-            html {
-                scroll-behavior: auto;
-            }
-
-
-            /* no hover lifts/nudges or press scale */
-            .menu-item,
-            .logout-button,
-            .view-site,
-            .stat-card,
-            .quick-card,
-            .mobile-toggle {
-
-                transform: none !important;
-            }
-
-
-            /* mobile drawer: fade in place instead of sliding */
-            .sidebar {
-
-                transition:
-                    opacity 200ms ease;
-            }
-
-
-            *,
-            *::before,
-            *::after {
-                animation-duration: 1ms !important;
-                animation-iteration-count: 1 !important;
-            }
-        }
-
-
-        @media (prefers-reduced-motion: reduce) and (max-width: 850px) {
-
-            .sidebar:not(.show) {
-
-                opacity: 0;
-            }
-        }
-
-    </style>
-
 <style>
-/* Phone polish: two stat cards per row, smaller icons */
-@media (max-width: 600px) {
-    .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-    .stat-card { padding: 15px; border-radius: 14px; }
-    .stat-card:last-child:nth-child(odd) { grid-column: 1 / -1; }
-    .stat-top { gap: 8px; margin-bottom: 10px; }
-    .stat-icon { flex: none; width: 34px; height: 34px; border-radius: 10px; font-size: 16px; }
-    .stat-card h3 { font-size: 22px; }
-    .stat-card p { font-size: 12px; }
-    .quick-card { padding: 14px 16px; gap: 12px; border-radius: 14px; }
-    .quick-icon { flex: none; width: 40px; height: 40px; border-radius: 12px; font-size: 18px; }
-}
+    /* the title (phones) or the dates (wide screens) on the left, the period on the right */
+    .dash-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+    }
+
+    .dash-title {
+        min-width: 0;
+    }
+
+    .dash-title h1 {
+        font-size: 24px;
+        font-weight: 700;
+        line-height: 1.25;
+        letter-spacing: -0.02em;
+    }
+
+    .dash-title p {
+        margin-top: 2px;
+        color: var(--text-3);
+        font-size: 13px;
+    }
+
+    .dash-dates {
+        color: var(--text-3);
+        font-size: 13px;
+    }
+
+    .period {
+        position: relative;
+        flex: none;
+        margin: 0;
+    }
+
+    .period select {
+        height: 38px;
+        padding: 0 38px 0 16px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--surface);
+        color: var(--text);
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        -webkit-appearance: none;
+        appearance: none;
+        transition: border-color 150ms ease;
+    }
+
+    .period select:focus-visible {
+        outline: 2px solid var(--ring);
+        outline-offset: 2px;
+    }
+
+    .period .i {
+        position: absolute;
+        top: 50%;
+        right: 14px;
+        width: 15px;
+        height: 15px;
+        color: var(--text-3);
+        transform: translateY(-50%);
+        pointer-events: none;
+    }
+
+    @media (hover: hover) and (pointer: fine) {
+        .period select:hover {
+            border-color: var(--line-2);
+        }
+    }
+
+    /* phones: the latest bookings as a list of rounded rows */
+    .recent-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 10px;
+    }
+
+    .recent-head h2 {
+        font-size: 16px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+    }
+
+    .recent-head a {
+        font-size: 12.5px;
+        font-weight: 600;
+    }
+
+    .recent-list {
+        display: grid;
+        gap: 8px;
+    }
+
+    .recent-item {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-height: 68px;
+        padding: 10px 16px 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 22px;
+        background: var(--surface);
+        color: var(--text);
+        transition: background-color 120ms ease, transform 140ms var(--ease-out);
+    }
+
+    .recent-item:hover {
+        text-decoration: none;
+    }
+
+    .recent-item:active {
+        background: var(--surface-2);
+        transform: scale(0.985);
+    }
+
+    .recent-text {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .recent-name {
+        display: block;
+        overflow: hidden;
+        font-size: 14px;
+        font-weight: 600;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+    }
+
+    .recent-sub {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 3px;
+        overflow: hidden;
+        color: var(--text-3);
+        font-size: 12px;
+        white-space: nowrap;
+    }
+
+    .recent-sub .pill {
+        flex: none;
+        height: 20px;
+        padding: 0 8px;
+        font-size: 11px;
+    }
+
+    .recent-end {
+        flex: none;
+        text-align: right;
+    }
+
+    .recent-amount {
+        display: block;
+        font-size: 15px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+    }
+
+    .recent-note {
+        display: block;
+        overflow: hidden;
+        max-width: 96px;
+        color: var(--text-3);
+        font-size: 11.5px;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .recent-item {
+            transform: none !important;
+        }
+    }
 </style>
-<?php $glassTheme = "admin"; require __DIR__ . "/../includes/glass.php"; ?>
-</head>
+<?php admin_shell_body(); ?>
 
+<div class="stack">
 
-<body>
+    <!-- TITLE AND PERIOD -->
 
-
-<!-- ======================================================
-     SIDEBAR
-====================================================== -->
-
-<aside
-    class="sidebar"
-    id="sidebar"
->
-
-    <div class="sidebar-logo">
-
-        <div class="logo-icon">
-            <?= icon("home") ?>
+    <div class="dash-head">
+        <div class="dash-title show-sm">
+            <h1>Dashboard</h1>
+            <p>Welcome back, <?= h($admin["full_name"]) ?></p>
         </div>
 
-        <div class="logo-text">
+        <p class="dash-dates hide-sm"><?= h($settings["label"]) ?> · <?= h($window["label"]) ?></p>
 
-            <h2>
-                ARVE'S House
-            </h2>
-
-            <span>
-                Administration
-            </span>
-
-        </div>
-
+        <form class="period" method="get">
+            <label class="sr-only" for="range">Period</label>
+            <select id="range" name="range" onchange="this.form.submit()">
+                <?php foreach ($periods as $key => $period): ?>
+                    <option value="<?= h($key) ?>" <?= (string) $key === $range ? "selected" : "" ?>><?= h($period["name"]) ?></option>
+                <?php endforeach; ?>
+            </select>
+            <?= icon("calendar") ?>
+            <noscript><button class="btn btn-sm" type="submit">Show</button></noscript>
+        </form>
     </div>
 
 
-    <div class="sidebar-menu">
-
-
-        <div class="menu-title">
-            Main
-        </div>
-
-
-        <a
-            href="dashboard.php"
-            class="menu-item active"
-        >
-
-            <span class="menu-icon">
-                <?= icon("chart") ?>
-            </span>
-
-            Dashboard
-
-        </a>
-
-
-        <a
-            href="reservations.php"
-            class="menu-item"
-        >
-
-            <span class="menu-icon">
-                <?= icon("calendar") ?>
-            </span>
-
-            Reservations
-
-        </a>
-
-        <a href="calendar.php" class="menu-item">
-            <span class="menu-icon"><?= icon("calendar") ?></span>
-            Calendar
-        </a>
-
-
-        <a
-            href="rooms.php"
-            class="menu-item"
-        >
-
-            <span class="menu-icon">
-                <?= icon("bed") ?>
-            </span>
-
-            Rooms
-
-        </a>
-
-
-        <a
-            href="payment.php"
-            class="menu-item"
-        >
-
-            <span class="menu-icon">
-                <?= icon("credit-card") ?>
-            </span>
-
-            Payments
-
-        </a>
-
-
-        <div class="menu-title">
-            Management
-        </div>
-
-
-        <a
-            href="customers.php"
-            class="menu-item"
-        >
-
-            <span class="menu-icon">
-                <?= icon("users") ?>
-            </span>
-
-            Customers
-
-        </a>
-
-        <a href="messages.php" class="menu-item">
-            <span class="menu-icon"><?= icon("mail") ?></span>
-            Messages
-            <?php if ($chatUnread > 0): ?>
-                <span style="margin-left:auto;min-width:20px;height:20px;padding:0 6px;border-radius:999px;background:#dc2626;color:#fff;font-size:11px;font-weight:800;line-height:20px;text-align:center"><?= $chatUnread > 9 ? "9+" : $chatUnread ?></span>
-            <?php endif; ?>
-        </a>
-
-
-
-        <a
-            href="site_settings.php"
-            class="menu-item"
-        >
-
-            <span class="menu-icon">
-                <?= icon("settings") ?>
-            </span>
-
-            Settings
-
-        </a>
-
-
-        <a
-            href="account.php"
-            class="menu-item"
-        >
-
-            <span class="menu-icon">
-                <?= icon("lock") ?>
-            </span>
-
-            Change Password
-
-        </a>
-
-
-        <a
-            href="admins.php"
-            class="menu-item"
-        >
-
-            <span class="menu-icon">
-                <?= icon("shield") ?>
-            </span>
-
-            Admins
-
-        </a>
-
-
-        <a
-            href="../index.php"
-            class="menu-item"
-            target="_blank"
-        >
-
-            <span class="menu-icon">
-                <?= icon("globe") ?>
-            </span>
-
-            View Website
-
-        </a>
-
-    </div>
-
-
-    <div class="sidebar-footer">
-
-        <a
-            href="../logout.php"
-            class="logout-button"
-        >
-            <?= icon("log-out") ?> Logout
-        </a>
-
-    </div>
-
-</aside>
-
-
-
-<!-- ======================================================
-     MAIN
-====================================================== -->
-
-<main class="main">
-
-
-    <!-- TOPBAR -->
-
-    <header class="topbar">
-
-
-        <div
-            style="
-                display:flex;
-                align-items:center;
-                gap:15px;
-            "
-        >
-
-            <button
-                class="mobile-toggle"
-                onclick="toggleSidebar()"
-            >
-                <?= icon("menu") ?>
-            </button>
-
-
-            <div class="topbar-left">
-
-                <h1>
-                    Dashboard
-                </h1>
-
-                <p>
-                    ARVE'S House Reservation Management System
-                </p>
-
+    <!-- STATS -->
+
+    <section class="stats" aria-label="<?= h($settings["label"]) ?>">
+
+        <a class="stat has-ring tone-green" href="<?= admin_can("analytics") ? "analytics.php?range=" . h($range) : "payment.php" ?>">
+            <div class="stat-main">
+                <div class="stat-label">Revenue</div>
+                <div class="stat-value"><?= h(peso($now["revenue"])) ?><span class="stat-unit"><?= h($unit) ?></span></div>
+                <?= stat_change_html($revenueChange, $versus) ?>
             </div>
+            <div class="stat-icon"><?= icon("wallet") ?></div>
+            <?= ring_html($shares["paid"], "of the value booked in this period is paid", "paid") ?>
+        </a>
 
-        </div>
+        <a class="stat has-ring is-featured tone-blue" href="reservations.php">
+            <div class="stat-main">
+                <div class="stat-label">Reservations</div>
+                <div class="stat-value"><?= number_format($now["reservations"]) ?><span class="stat-unit"><?= h($unit) ?></span></div>
+                <?= stat_change_html(stat_change($now["reservations"], $before["reservations"]), $versus) ?>
+            </div>
+            <div class="stat-icon"><?= icon("calendar") ?></div>
+            <?= ring_html($shares["confirmed"], "of the bookings made in this period are confirmed", "confirmed") ?>
+        </a>
 
+        <a class="stat has-ring tone-violet" href="customers.php">
+            <div class="stat-main">
+                <div class="stat-label">Customers</div>
+                <div class="stat-value"><?= number_format($totalCustomers) ?><span class="stat-unit"> in total</span></div>
+                <?= stat_change_html(stat_change($totalCustomers, $totalCustomers - $now["customers"]), "vs " . $settings["short"] . " ago") ?>
+            </div>
+            <div class="stat-icon"><?= icon("users") ?></div>
+            <?= ring_html($shares["booked"], "of all customers have booked at least once", "have booked") ?>
+        </a>
 
-        <div class="topbar-right">
-
-
-            <a
-                href="../index.php"
-                target="_blank"
-                class="view-site"
-            >
-                View Website ↗
-            </a>
-
-
-            <div class="admin-profile">
-
-
-                <?php if (!empty($admin["profile_image"])): ?>
-
-                    <img
-                        src="../<?= htmlspecialchars(
-                            $admin["profile_image"]
-                        ) ?>"
-                        class="admin-avatar"
-                        alt="Admin"
-                    >
-
+        <a class="stat has-ring tone-cyan" href="<?= admin_can("analytics") ? "analytics.php?range=" . h($range) : "calendar.php" ?>">
+            <div class="stat-main">
+                <!-- wide screens show the share; phones show the nights, the ring shows the share -->
+                <div class="stat-label"><span class="hide-sm">Occupancy</span><span class="show-sm">Booked nights</span></div>
+                <div class="stat-value">
+                    <span class="hide-sm"><?= number_format($now["occupancy"], $now["occupancy"] < 10 ? 1 : 0) ?>%</span>
+                    <span class="show-sm"><?= number_format($now["booked_nights"]) ?><span class="stat-unit"><?= h($unit) ?></span></span>
+                </div>
+                <?php if (abs($occupancyChange) < 0.05): ?>
+                    <div class="stat-delta"><?= icon("arrow-right", 14) ?> No change</div>
                 <?php else: ?>
-
-                    <div class="admin-avatar">
-                        A
+                    <div class="stat-delta <?= $occupancyChange > 0 ? "is-good" : "is-bad" ?>">
+                        <?= icon($occupancyChange > 0 ? "arrow-up-right" : "arrow-down-right", 14) ?>
+                        <span class="sr-only"><?= $occupancyChange > 0 ? "Up" : "Down" ?></span>
+                        <?= number_format(abs($occupancyChange), 1) ?> pts
                     </div>
-
                 <?php endif; ?>
+                <div class="stat-note"><?= h($versus) ?></div>
+            </div>
+            <div class="stat-icon"><?= icon("trending-up") ?></div>
+            <?= ring_html($now["occupancy"], "of the room nights in this period are booked", "occupied") ?>
+        </a>
+
+    </section>
 
 
-                <div class="admin-info">
+    <!-- WAITING FOR YOU (phones: quick actions) -->
 
-                    <strong>
-                        <?= htmlspecialchars(
-                            $admin["full_name"]
-                            ?? "Administrator"
-                        ) ?>
-                    </strong>
+    <?php if ($todo): ?>
+        <h2 class="todo-title">Quick Actions</h2>
 
-                    <span>
-                        Administrator
+        <section class="todo" aria-label="Waiting for you">
+            <?php foreach ($todo as $index => [$count, $label, $short, $iconName, $tone, $href]): ?>
+                <a class="todo-item<?= $count === 0 ? " is-clear" : "" ?><?= $index === $featured ? " is-featured" : "" ?>" href="<?= h($href) ?>">
+                    <span class="tile-icon tone-<?= $count === 0 && $index !== $featured ? "gray" : $tone ?>"><?= icon($iconName) ?></span>
+                    <span class="todo-text">
+                        <span class="todo-count"><?= number_format($count) ?></span>
+                        <span class="todo-label"><span class="todo-long"><?= h($label) ?></span><span class="todo-short"><?= h($short) ?></span></span>
                     </span>
-
-                </div>
-
-            </div>
-
-        </div>
-
-    </header>
-
-
-
-    <!-- CONTENT -->
-
-    <div class="content">
-
-
-        <!-- WELCOME -->
-
-        <section class="welcome">
-
-            <h2>
-                Welcome back,
-                <?= htmlspecialchars(
-                            $admin["full_name"]
-                    ?? "Admin"
-                ) ?>
-            </h2>
-
-            <p>
-                Manage reservations, rooms, customer accounts
-                and payments from one centralized dashboard.
-            </p>
-
-        </section>
-
-
-
-        <!-- STATISTICS -->
-
-        <section class="stats-grid">
-
-
-            <div class="stat-card">
-
-                <div class="stat-top">
-
-                    <p>Customers</p>
-
-                    <div class="stat-icon">
-                        <?= icon("users") ?>
-                    </div>
-
-                </div>
-
-                <h3>
-                    <?= number_format(
-                        $totalCustomers
-                    ) ?>
-                </h3>
-
-                <p>
-                    Registered customers
-                </p>
-
-            </div>
-
-
-
-            <div class="stat-card">
-
-                <div class="stat-top">
-
-                    <p>Rooms</p>
-
-                    <div class="stat-icon">
-                        <?= icon("bed") ?>
-                    </div>
-
-                </div>
-
-                <h3>
-                    <?= number_format(
-                        $totalRooms
-                    ) ?>
-                </h3>
-
-                <p>
-                    Total rooms
-                </p>
-
-            </div>
-
-
-
-            <div class="stat-card">
-
-                <div class="stat-top">
-
-                    <p>Reservations</p>
-
-                    <div class="stat-icon">
-                        <?= icon("calendar") ?>
-                    </div>
-
-                </div>
-
-                <h3>
-                    <?= number_format(
-                        $totalReservations
-                    ) ?>
-                </h3>
-
-                <p>
-                    Total reservations
-                </p>
-
-            </div>
-
-
-
-            <div class="stat-card">
-
-                <div class="stat-top">
-
-                    <p>Pending</p>
-
-                    <div class="stat-icon">
-                        <?= icon("clock") ?>
-                    </div>
-
-                </div>
-
-                <h3>
-                    <?= number_format(
-                        $pendingReservations
-                    ) ?>
-                </h3>
-
-                <p>
-                    Awaiting confirmation
-                </p>
-
-            </div>
-
-
-
-            <div class="stat-card">
-
-                <div class="stat-top">
-
-                    <p>Confirmed</p>
-
-                    <div class="stat-icon">
-                        <?= icon("check-circle") ?>
-                    </div>
-
-                </div>
-
-                <h3>
-                    <?= number_format(
-                        $confirmedReservations
-                    ) ?>
-                </h3>
-
-                <p>
-                    Confirmed bookings
-                </p>
-
-            </div>
-
-
-
-            <div class="stat-card">
-
-                <div class="stat-top">
-
-                    <p>Verified Payments</p>
-
-                    <div class="stat-icon">
-                        <?= icon("credit-card") ?>
-                    </div>
-
-                </div>
-
-                <h3>
-                    <?= number_format(
-                        $verifiedPayments
-                    ) ?>
-                </h3>
-
-                <p>
-                    Verified transactions
-                </p>
-
-            </div>
-
-
-
-            <div class="stat-card">
-
-                <div class="stat-top">
-
-                    <p>Revenue</p>
-
-                    <div class="stat-icon">
-                        <?= icon("wallet") ?>
-                    </div>
-
-                </div>
-
-                <h3>
-                    ₱<?= number_format(
-                        $totalRevenue,
-                        2
-                    ) ?>
-                </h3>
-
-                <p>
-                    Verified payments
-                </p>
-
-            </div>
-
-
-        </section>
-
-
-
-        <!-- QUICK ACTIONS -->
-
-        <div class="section-header">
-
-            <h2>
-                Quick Actions
-            </h2>
-
-        </div>
-
-
-        <section class="quick-grid">
-
-
-            <a
-                href="reservations.php"
-                class="quick-card"
-            >
-
-                <div class="quick-icon">
-                    <?= icon("calendar") ?>
-                </div>
-
-                <div>
-
-                    <strong>
-                        Reservations
-                    </strong>
-
-                    <span>
-                        Manage bookings
-                    </span>
-
-                </div>
-
-            </a>
-
-
-
-            <a
-                href="rooms.php"
-                class="quick-card"
-            >
-
-                <div class="quick-icon">
-                    <?= icon("bed") ?>
-                </div>
-
-                <div>
-
-                    <strong>
-                        Manage Rooms
-                    </strong>
-
-                    <span>
-                        Rooms & availability
-                    </span>
-
-                </div>
-
-            </a>
-
-
-
-            <a
-                href="payment.php"
-                class="quick-card"
-            >
-
-                <div class="quick-icon">
-                    <?= icon("credit-card") ?>
-                </div>
-
-                <div>
-
-                    <strong>
-                        Payments
-                    </strong>
-
-                    <span>
-                        Verify transactions
-                    </span>
-
-                </div>
-
-            </a>
-
-
-
-            <a
-                href="customers.php"
-                class="quick-card"
-            >
-
-                <div class="quick-icon">
-                    <?= icon("users") ?>
-                </div>
-
-                <div>
-
-                    <strong>
-                        Customers
-                    </strong>
-
-                    <span>
-                        Customer accounts
-                    </span>
-
-                </div>
-
-            </a>
-
-
-            <a
-                href="site_settings.php"
-                class="quick-card"
-            >
-
-                <div class="quick-icon">
-                    <?= icon("settings") ?>
-                </div>
-
-                <div>
-
-                    <strong>
-                        Settings
-                    </strong>
-
-                    <span>
-                        Edit homepage card
-                    </span>
-
-                </div>
-
-            </a>
-
-
-        </section>
-
-
-
-        <!-- RECENT RESERVATIONS -->
-
-        <section class="table-card">
-
-
-            <div class="table-header">
-
-                <h2>
-                    Recent Reservations
-                </h2>
-
-                <a href="reservations.php">
-                    View All →
+                    <?= icon("chevron-right", 16) ?>
                 </a>
+            <?php endforeach; ?>
+        </section>
+    <?php endif; ?>
 
+
+    <!-- PHONES: THE LATEST BOOKINGS AS A LIST -->
+
+    <?php if ($recentReservations): ?>
+        <section class="recent show-sm" aria-label="Recent reservations">
+            <div class="recent-head">
+                <h2>Recent Reservations</h2>
+                <?php if (admin_can("reservations")): ?>
+                    <a href="reservations.php">View All</a>
+                <?php endif; ?>
             </div>
 
-
-            <?php if (
-                count($recentReservations) > 0
-            ): ?>
-
-
-                <div class="table-wrapper">
-
-                    <table>
-
-
-                        <thead>
-
-                            <tr>
-
-                                <th>
-                                    Customer
-                                </th>
-
-                                <th>
-                                    Room
-                                </th>
-
-                                <th>
-                                    Check-in
-                                </th>
-
-                                <th>
-                                    Check-out
-                                </th>
-
-                                <th>
-                                    Guests
-                                </th>
-
-                                <th>
-                                    Amount
-                                </th>
-
-                                <th>
-                                    Status
-                                </th>
-
-                            </tr>
-
-                        </thead>
+            <ul class="recent-list">
+                <?php foreach (array_slice($recentReservations, 0, 5) as $reservation): ?>
+                    <li>
+                        <a class="recent-item" href="<?= admin_can("reservations") ? "reservations.php?q=" . (int) $reservation["id"] : "#" ?>">
+                            <?= admin_avatar($reservation, 44) ?>
+                            <span class="recent-text">
+                                <span class="recent-name"><?= h($reservation["full_name"]) ?></span>
+                                <span class="recent-sub">
+                                    <?= status_pill($reservation["status"]) ?>
+                                    <span><?= h(admin_stay($reservation["check_in"], $reservation["check_out"])) ?></span>
+                                </span>
+                            </span>
+                            <span class="recent-end">
+                                <span class="recent-amount"><?= h(peso($reservation["total_amount"])) ?></span>
+                                <span class="recent-note"><?= h($reservation["room_name"]) ?></span>
+                            </span>
+                        </a>
+                    </li>
+                <?php endforeach; ?>
+            </ul>
+        </section>
+    <?php endif; ?>
 
 
-                        <tbody>
+    <div class="grid grid-main">
 
+        <!-- LEFT: reservations, then what the team did -->
 
-                            <?php foreach (
-                                $recentReservations
-                                as $reservation
-                            ): ?>
+        <div class="col">
 
+            <section class="card hide-sm">
+                <div class="card-head">
+                    <h2 class="card-title">Recent Reservations</h2>
+                    <?php if (admin_can("reservations")): ?>
+                        <a class="card-link" href="reservations.php">View all</a>
+                    <?php endif; ?>
+                </div>
 
+                <?php if ($recentReservations): ?>
+                    <div class="table-wrap">
+                        <table class="table">
+                            <thead>
                                 <tr>
-
-
-                                    <td>
-
-                                        <div class="customer-info">
-
-
-                                            <?php if (
-                                                !empty(
-                                                    $reservation[
-                                                        "profile_image"
-                                                    ]
-                                                )
-                                            ): ?>
-
-                                                <img
-                                                    src="../<?= htmlspecialchars(
-                                                        $reservation[
-                                                            "profile_image"
-                                                        ]
-                                                    ) ?>"
-                                                    class="customer-picture"
-                                                    alt="Profile"
-                                                >
-
-                                            <?php else: ?>
-
-                                                <div
-                                                    class="customer-placeholder"
-                                                >
-                                                    <?= icon("user") ?>
-                                                </div>
-
-                                            <?php endif; ?>
-
-
-                                            <div>
-
-                                                <div
-                                                    class="customer-name"
-                                                >
-
-                                                    <?= htmlspecialchars(
-                                                        $reservation[
-                                                            "customer_name"
-                                                        ]
-                                                        ?? "Customer"
-                                                    ) ?>
-
-                                                </div>
-
-                                                <div
-                                                    class="customer-email"
-                                                >
-
-                                                    <?= htmlspecialchars(
-                                                        $reservation[
-                                                            "customer_email"
-                                                        ]
-                                                        ?? ""
-                                                    ) ?>
-
-                                                </div>
-
-                                            </div>
-
-                                        </div>
-
-                                    </td>
-
-
-                                    <td>
-
-                                        <?= htmlspecialchars(
-                                            $reservation[
-                                                "room_name"
-                                            ]
-                                        ) ?>
-
-                                    </td>
-
-
-                                    <td>
-
-                                        <?= htmlspecialchars(
-                                            $reservation[
-                                                "check_in"
-                                            ]
-                                        ) ?>
-
-                                    </td>
-
-
-                                    <td>
-
-                                        <?= htmlspecialchars(
-                                            $reservation[
-                                                "check_out"
-                                            ]
-                                        ) ?>
-
-                                    </td>
-
-
-                                    <td>
-
-                                        <?= (int)
-                                            $reservation[
-                                                "guests"
-                                            ]
-                                        ?>
-
-                                    </td>
-
-
-                                    <td class="amount">
-
-                                        ₱<?= number_format(
-                                            (float)
-                                            $reservation[
-                                                "total_amount"
-                                            ],
-                                            2
-                                        ) ?>
-
-                                    </td>
-
-
-                                    <td>
-
-                                        <span
-                                            class="status <?= htmlspecialchars(
-                                                $reservation[
-                                                    "status"
-                                                ]
-                                            ) ?>"
-                                        >
-
-                                            <?= ucfirst(
-                                                htmlspecialchars(
-                                                    $reservation[
-                                                        "status"
-                                                    ]
-                                                )
-                                            ) ?>
-
-                                        </span>
-
-                                    </td>
-
-
+                                    <th>Guest</th>
+                                    <th>Room</th>
+                                    <th>Stay</th>
+                                    <th class="right">Amount</th>
+                                    <th>Status</th>
+                                    <th class="hide-narrow">Booked</th>
                                 </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($recentReservations as $reservation): ?>
+                                    <tr>
+                                        <td>
+                                            <div class="person">
+                                                <?= admin_avatar($reservation, 32) ?>
+                                                <div class="person-text">
+                                                    <span class="person-name"><?= h($reservation["full_name"]) ?></span>
+                                                    <span class="person-sub"><?= h($reservation["email"]) ?></span>
+                                                </div>
+                                            </div>
+                                        </td>
+                                        <td class="cell-clip"><?= h($reservation["room_name"]) ?></td>
+                                        <td class="nowrap"><?= h(admin_stay($reservation["check_in"], $reservation["check_out"])) ?></td>
+                                        <td class="right num strong"><?= h(peso($reservation["total_amount"])) ?></td>
+                                        <td><?= status_pill($reservation["status"]) ?></td>
+                                        <td class="nowrap soft hide-narrow"><?= h(admin_date($reservation["created_at"], "M j, Y")) ?></td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
 
+                    <?php if (admin_can("reservations")): ?>
+                        <div class="card-foot">
+                            <a class="card-link" href="reservations.php">View all reservations <?= icon("chevron-right", 14) ?></a>
+                        </div>
+                    <?php endif; ?>
+                <?php else: ?>
+                    <div class="empty">
+                        <div class="empty-icon"><?= icon("calendar", 22) ?></div>
+                        <h3>No reservations yet</h3>
+                        <p>New bookings show up here as soon as a guest makes one.</p>
+                    </div>
+                <?php endif; ?>
+            </section>
 
-                            <?php endforeach; ?>
+            <?php if (admin_can("activity")): ?>
+                <section class="card sm-5">
+                    <div class="card-head">
+                        <h2 class="card-title">Activity Logs</h2>
+                        <?php if ($activityPage): ?>
+                            <a class="card-link" href="activity.php">View all</a>
+                        <?php endif; ?>
+                    </div>
 
-
-                        </tbody>
-
-                    </table>
-
-                </div>
-
-
-            <?php else: ?>
-
-
-                <div class="empty">
-
-                    <h3>
-                        No reservations yet
-                    </h3>
-
-                    <p>
-                        New reservations will appear here.
-                    </p>
-
-                </div>
-
-
+                    <?php if ($adminActivity): ?>
+                        <div class="table-wrap">
+                            <table class="table">
+                                <thead>
+                                    <tr>
+                                        <th>Action</th>
+                                        <th class="hide-sm">Details</th>
+                                        <th>By</th>
+                                        <th class="right">When</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($adminActivity as $event): ?>
+                                        <tr>
+                                            <td>
+                                                <div class="row">
+                                                    <span class="feed-icon tone-<?= activity_tone($event["type"]) ?>"><?= icon(activity_icon($event["type"])) ?></span>
+                                                    <span class="strong"><?= h(activity_label($event["type"])) ?></span>
+                                                </div>
+                                            </td>
+                                            <td class="soft hide-sm break"><?= h($event["summary"]) ?></td>
+                                            <td><?= h($event["actor_name"] !== "" ? $event["actor_name"] : "Admin") ?></td>
+                                            <td class="right nowrap soft" title="<?= h(activity_time($event["created_at"])) ?>"><?= h(activity_time_ago($event["created_at"])) ?></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php else: ?>
+                        <div class="empty empty-sm">
+                            <div class="empty-icon"><?= icon("file-text", 20) ?></div>
+                            <p>What admins do (logins, verified payments, edited rooms) is listed here.</p>
+                        </div>
+                    <?php endif; ?>
+                </section>
             <?php endif; ?>
 
+        </div>
 
-        </section>
 
+        <!-- RIGHT: money, notifications, what guests did -->
+
+        <div class="col">
+
+            <section class="card sm-1">
+                <div class="card-head">
+                    <div>
+                        <h2 class="card-title">Analytics Overview</h2>
+                        <p class="card-sub">Revenue per <?= h($bucketName) ?>, <?= h(strtolower($settings["label"])) ?></p>
+                    </div>
+                    <?php if (admin_can("analytics")): ?>
+                        <a class="card-link" href="analytics.php?range=<?= h($range) ?>">Open analytics</a>
+                    <?php endif; ?>
+                </div>
+
+                <div class="chart-head">
+                    <div class="chart-figure"><?= h(peso($now["revenue"])) ?></div>
+                    <div class="right">
+                        <?php if ($revenueChange["direction"] === "up" || $revenueChange["direction"] === "down"): ?>
+                            <div class="stat-delta <?= $revenueChange["good"] ? "is-good" : "is-bad" ?>" style="margin-top:0">
+                                <?= icon($revenueChange["direction"] === "up" ? "arrow-up-right" : "arrow-down-right", 14) ?>
+                                <span class="sr-only"><?= $revenueChange["direction"] === "up" ? "Up" : "Down" ?></span>
+                                <?= h($revenueChange["text"]) ?>
+                            </div>
+                            <div class="chart-figure-note"><?= h($versus) ?></div>
+                        <?php else: ?>
+                            <div class="chart-figure-note"><?= number_format($now["payments"]) ?> verified <?= $now["payments"] === 1 ? "payment" : "payments" ?></div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+
+                <div class="chart" id="revenue-chart" data-chart>
+                    <?= chart_json([
+                        "type" => "line",
+                        "labels" => $revenue["labels"],
+                        "ticks" => $revenue["ticks"],
+                        "series" => [["name" => "Revenue", "values" => $revenue["values"]]],
+                        "format" => "peso",
+                        "height" => 210,
+                        "axis" => ucfirst($bucketName),
+                        "label" => "Revenue per " . $bucketName . ", " . strtolower($settings["label"]) . ", " . peso($now["revenue"])
+                            . " in total. Use the left and right arrow keys to read each value.",
+                    ]) ?>
+                </div>
+
+                <div class="card-foot">
+                    <button class="link-btn" type="button" data-chart-table="revenue-chart">Show as a table</button>
+                </div>
+            </section>
+
+            <section class="card sm-3">
+                <div class="card-head">
+                    <h2 class="card-title">Notifications</h2>
+                    <a class="card-link" href="notifications.php">View all</a>
+                </div>
+                <?= admin_feed($notifications, ["notify_links" => true, "empty" => "No notifications yet"]) ?>
+            </section>
+
+            <section class="card sm-4">
+                <div class="card-head">
+                    <h2 class="card-title">Recent Activity</h2>
+                    <?php if ($activityPage): ?>
+                        <a class="card-link" href="activity.php">View all</a>
+                    <?php endif; ?>
+                </div>
+                <?= admin_feed($guestActivity, ["empty" => "What guests do (bookings, payments, messages) is listed here"]) ?>
+            </section>
+
+        </div>
 
     </div>
 
-</main>
+</div>
 
-
-
-<script>
-
-function toggleSidebar() {
-
-    document
-        .getElementById("sidebar")
-        .classList
-        .toggle("show");
-
-}
-
-</script>
-
-
-</body>
-
-</html>
+<?php admin_shell_end(); ?>

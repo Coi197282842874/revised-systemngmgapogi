@@ -2,44 +2,57 @@
 session_start();
 
 require_once __DIR__ . "/../config/database.php";
-require_once __DIR__ . "/../includes/icons.php";
-require_once __DIR__ . "/../includes/chat.php";
+require_once __DIR__ . "/../includes/admin-shell.php";
+require_once __DIR__ . "/../includes/paymongo.php";
 
-ensure_chat_schema($pdo);
-$chatUnread = chat_unread_for_admins($pdo);
+$admin = admin_boot($pdo, "reservations");
+
+const RESERVATIONS_PER_PAGE = 25;
 
 
 // ======================================================
-// ADMIN CHECK
+// FILTERS: ?status=  ?q=  ?page=
+// q: "12" or "#12" finds reservation 12; anything else is looked up in the guest's name,
+// the guest's email and the room's name.
 // ======================================================
 
-if (
-    !isset($_SESSION["user_id"]) ||
-    ($_SESSION["role"] ?? "") !== "admin"
-) {
-    header("Location: ../login.php");
-    exit;
+$statuses = ["all", "pending", "confirmed", "completed", "declined", "cancelled"];
+
+$statusFilter = $_GET["status"] ?? "all";
+
+if (!in_array($statusFilter, $statuses, true)) {
+    $statusFilter = "all";
 }
 
+$search = admin_query();
+
+$here = fn (array $change = []) => admin_url(
+    "reservations.php",
+    $change + ["status" => $statusFilter, "q" => $search, "page" => (int) ($_GET["page"] ?? 1)]
+);
+
 
 // ======================================================
-// HANDLE ACTIONS
+// DECLINE / COMPLETE
 // ======================================================
 
 if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
-    $reservation_id =
-        (int) ($_POST["reservation_id"] ?? 0);
+    $reservationId = (int) ($_POST["reservation_id"] ?? 0);
+    $action = $_POST["action"] ?? "";
 
-    $action =
-        $_POST["action"] ?? "";
-
-    if ($reservation_id > 0) {
+    if (!admin_check_csrf()) {
+        admin_flash("Your session expired. Please try again.", "error");
+    } elseif ($reservationId > 0) {
 
         $stmt = $pdo->prepare("
             SELECT
                 reservations.id,
                 reservations.status,
+                reservations.check_in,
+                reservations.check_out,
+                rooms.room_name,
+                users.full_name AS customer_name,
                 (
                     SELECT payments.status
                     FROM payments
@@ -48,131 +61,136 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                     LIMIT 1
                 ) AS payment_status
             FROM reservations
+            INNER JOIN rooms ON rooms.id = reservations.room_id
+            INNER JOIN users ON users.id = reservations.user_id
             WHERE reservations.id = ?
             LIMIT 1
         ");
 
-        $stmt->execute([
-            $reservation_id
-        ]);
+        $stmt->execute([$reservationId]);
+        $reservation = $stmt->fetch();
 
-        $reservation =
-            $stmt->fetch();
+        if (!$reservation) {
+            admin_flash("That reservation no longer exists.", "error");
+        } elseif (
+            $action === "decline"
+            && $reservation["status"] === "pending"
+            && ($reservation["payment_status"] ?? null) !== "verified"
+        ) {
 
-        if ($reservation) {
+            $stmt = $pdo->prepare("UPDATE reservations SET status = 'declined' WHERE id = ? AND status = 'pending'");
+            $stmt->execute([$reservationId]);
 
-            $paymentStatus =
-                $reservation["payment_status"]
-                ?? null;
+            if ($stmt->rowCount() > 0) {
+                log_activity(
+                    $pdo,
+                    "reservation.declined",
+                    "Declined reservation #" . $reservationId . " of " . $reservation["customer_name"]
+                        . " (" . $reservation["room_name"] . ", " . date("M j", strtotime($reservation["check_in"]))
+                        . " to " . date("M j", strtotime($reservation["check_out"])) . ")",
+                    ["entity_type" => "reservation", "entity_id" => $reservationId, "link" => "reservations.php?q=" . $reservationId]
+                );
 
-            if (
-                $action === "decline"
-                && $reservation["status"] === "pending"
-                && $paymentStatus !== "verified"
-            ) {
-
-                $stmt = $pdo->prepare("
-                    UPDATE reservations
-                    SET status = 'declined'
-                    WHERE id = ?
-                    AND status = 'pending'
-                ");
-
-                $stmt->execute([
-                    $reservation_id
-                ]);
-
-            } elseif (
-                $action === "complete"
-                && $reservation["status"] === "confirmed"
-            ) {
-
-                $stmt = $pdo->prepare("
-                    UPDATE reservations
-                    SET status = 'completed'
-                    WHERE id = ?
-                    AND status = 'confirmed'
-                ");
-
-                $stmt->execute([
-                    $reservation_id
-                ]);
+                admin_flash("Reservation #" . $reservationId . " was declined. Its dates are open again.");
             }
+
+        } elseif ($action === "complete" && $reservation["status"] === "confirmed") {
+
+            $stmt = $pdo->prepare("UPDATE reservations SET status = 'completed' WHERE id = ? AND status = 'confirmed'");
+            $stmt->execute([$reservationId]);
+
+            if ($stmt->rowCount() > 0) {
+                log_activity(
+                    $pdo,
+                    "reservation.completed",
+                    "Marked reservation #" . $reservationId . " of " . $reservation["customer_name"] . " as completed",
+                    ["entity_type" => "reservation", "entity_id" => $reservationId, "link" => "reservations.php?q=" . $reservationId]
+                );
+
+                admin_flash("Reservation #" . $reservationId . " is marked as completed.");
+            }
+
+        } else {
+            admin_flash("Reservation #" . $reservationId . " could not be changed: its status is already different.", "error");
         }
     }
 
-    header("Location: reservations.php");
+    header("Location: " . $here());
     exit;
 }
 
 
 // ======================================================
-// FILTER
+// NUMBERS ON TOP (all reservations, whatever the filters)
 // ======================================================
 
-$statusFilter = $_GET["status"] ?? "all";
+$totals = array_fill_keys($statuses, 0);
 
-$allowedFilters = [
-    "all",
-    "pending",
-    "confirmed",
-    "declined",
-    "cancelled",
-    "completed"
-];
+foreach ($pdo->query("SELECT status, COUNT(*) AS total FROM reservations GROUP BY status") as $row) {
+    if (isset($totals[$row["status"]])) {
+        $totals[$row["status"]] = (int) $row["total"];
+    }
 
-if (!in_array($statusFilter, $allowedFilters, true)) {
-    $statusFilter = "all";
+    $totals["all"] += (int) $row["total"];
 }
 
 
 // ======================================================
-// COUNTS
+// THE LIST
 // ======================================================
 
-$stmt = $pdo->query("
-    SELECT COUNT(*)
+$from = "
     FROM reservations
-");
-$totalReservations = (int) $stmt->fetchColumn();
+    INNER JOIN rooms ON reservations.room_id = rooms.id
+    INNER JOIN users ON reservations.user_id = users.id
+";
 
+$where = [];
+$params = [];
 
-$stmt = $pdo->query("
-    SELECT COUNT(*)
-    FROM reservations
-    WHERE status = 'pending'
-");
-$totalPending = (int) $stmt->fetchColumn();
+if ($search !== "") {
+    if (preg_match('/^#?(\d{1,9})$/', $search, $match)) {
+        $where[] = "reservations.id = ?";
+        $params[] = (int) $match[1];
+    } else {
+        $where[] = "(users.full_name LIKE ? OR users.email LIKE ? OR rooms.room_name LIKE ?)";
+        array_push($params, admin_like($search), admin_like($search), admin_like($search));
+    }
+}
 
+// the numbers on the tabs follow the search
+$tabCounts = array_fill_keys($statuses, 0);
 
-$stmt = $pdo->query("
-    SELECT COUNT(*)
-    FROM reservations
-    WHERE status = 'confirmed'
-");
-$totalConfirmed = (int) $stmt->fetchColumn();
+$stmt = $pdo->prepare(
+    "SELECT reservations.status, COUNT(*) AS total" . $from
+    . ($where ? " WHERE " . implode(" AND ", $where) : "")
+    . " GROUP BY reservations.status"
+);
+$stmt->execute($params);
 
+foreach ($stmt as $row) {
+    if (isset($tabCounts[$row["status"]])) {
+        $tabCounts[$row["status"]] = (int) $row["total"];
+    }
 
-$stmt = $pdo->query("
-    SELECT COUNT(*)
-    FROM reservations
-    WHERE status = 'completed'
-");
-$totalCompleted = (int) $stmt->fetchColumn();
+    $tabCounts["all"] += (int) $row["total"];
+}
 
+if ($statusFilter !== "all") {
+    $where[] = "reservations.status = ?";
+    $params[] = $statusFilter;
+}
 
-// ======================================================
-// GET RESERVATIONS
-// ONE RESERVATION = ONE ROW
-// LATEST PAYMENT STATUS ONLY
-// ======================================================
+$paging = admin_paginate($tabCounts[$statusFilter], RESERVATIONS_PER_PAGE);
 
-$sql = "
+// one reservation = one row, with its latest payment
+$stmt = $pdo->prepare("
     SELECT
         reservations.*,
         rooms.room_name,
         users.full_name AS customer_name,
         users.email AS customer_email,
+        users.phone AS customer_phone,
         users.profile_image,
 
         (
@@ -201,1415 +219,358 @@ $sql = "
             ORDER BY payments.id DESC
             LIMIT 1
         ) AS payment_method
-
-    FROM reservations
-
-    INNER JOIN rooms
-        ON reservations.room_id = rooms.id
-
-    INNER JOIN users
-        ON reservations.user_id = users.id
-";
-
-$params = [];
-
-if ($statusFilter !== "all") {
-
-    $sql .= "
-        WHERE reservations.status = ?
-    ";
-
-    $params[] = $statusFilter;
-}
-
-$sql .= "
-    ORDER BY reservations.created_at DESC
-";
-
-$stmt = $pdo->prepare($sql);
+    " . $from
+    . ($where ? " WHERE " . implode(" AND ", $where) : "")
+    . " ORDER BY reservations.created_at DESC, reservations.id DESC
+        LIMIT " . $paging["per_page"] . " OFFSET " . $paging["offset"]
+);
 
 $stmt->execute($params);
-
 $reservations = $stmt->fetchAll();
 
-
-// ======================================================
-// ADMIN INFO
-// ======================================================
-
-$stmt = $pdo->prepare("
-    SELECT *
-    FROM users
-    WHERE id = ?
-    LIMIT 1
-");
-
-$stmt->execute([
-    $_SESSION["user_id"]
+admin_shell_head([
+    "title" => "Reservations",
+    "subtitle" => "Every booking, its payment and what to do next",
+    "active" => "reservations",
 ]);
-
-$admin = $stmt->fetch();
 ?>
-
-<!DOCTYPE html>
-<html lang="en">
-
-<head>
-
-<meta charset="UTF-8">
-
-<meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0, viewport-fit=cover"
->
-
-<meta
-    name="theme-color"
-    content="#ffffff"
->
-
-<title>
-    Reservations | ARVE'S House
-</title>
-
 <style>
-
-/* MOTION TOKENS */
-
-:root {
-    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
-    --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
-    --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
-}
-
-* {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-}
-
-html {
-    -webkit-tap-highlight-color: transparent;
-    -webkit-text-size-adjust: 100%;
-    text-size-adjust: 100%;
-}
-
-body {
-    font-family: Arial, sans-serif;
-    background: #f3f5f9;
-    color: #111827;
-}
-
-
-/* CONTROLS (no double-tap delay, no long-press text selection) */
-
-button,
-.filter-btn,
-.logout-button {
-    touch-action: manipulation;
-    -webkit-user-select: none;
-    user-select: none;
-}
-
-.menu-item {
-    touch-action: manipulation;
-}
-
-
-/* SIDEBAR */
-
-.sidebar {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 270px;
-    height: 100vh;
-    height: 100dvh;
-    padding-top: env(safe-area-inset-top, 0px);
-    padding-bottom: env(safe-area-inset-bottom, 0px);
-    padding-left: env(safe-area-inset-left, 0px);
-    background: linear-gradient(
-        180deg,
-        #111827,
-        #172033
-    );
-    color: white;
-    display: flex;
-    flex-direction: column;
-    z-index: 1000;
-}
-
-.sidebar-logo {
-    height: 90px;
-    display: flex;
-    align-items: center;
-    padding: 0 28px;
-    border-bottom: 1px solid rgba(255,255,255,0.08);
-}
-
-.logo-icon {
-    width: 46px;
-    height: 46px;
-    border-radius: 14px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: #f59e0b;
-    color: #111827;
-    font-size: 22px;
-    margin-right: 12px;
-}
-
-.logo-text h2 {
-    font-size: 18px;
-}
-
-.logo-text span {
-    font-size: 11px;
-    color: #9ca3af;
-    text-transform: uppercase;
-    letter-spacing: 1.5px;
-}
-
-.sidebar-menu {
-    padding: 25px 18px;
-    flex: 1;
-}
-
-.menu-title {
-    color: #6b7280;
-    font-size: 11px;
-    font-weight: bold;
-    text-transform: uppercase;
-    letter-spacing: 1.5px;
-    padding: 0 14px;
-    margin: 15px 0 10px;
-}
-
-.menu-item {
-    display: flex;
-    align-items: center;
-    gap: 13px;
-    color: #cbd5e1;
-    text-decoration: none;
-    padding: 14px 16px;
-    border-radius: 12px;
-    margin-bottom: 7px;
-    transition:
-        background-color 180ms ease,
-        color 180ms ease;
-}
-
-@media (hover: hover) and (pointer: fine) {
-
-    .menu-item:hover {
-        background: rgba(255,255,255,0.08);
-        color: white;
-    }
-}
-
-.menu-item:focus-visible,
-.menu-item:active {
-    background: rgba(255,255,255,0.08);
-    color: white;
-}
-
-.menu-item.active {
-    background: #f59e0b;
-    color: #111827;
-    font-weight: bold;
-}
-
-.menu-icon {
-    width: 28px;
-    text-align: center;
-}
-
-.sidebar-footer {
-    padding: 20px;
-    border-top: 1px solid rgba(255,255,255,0.08);
-}
-
-.logout-button {
-    display: block;
-    width: 100%;
-    padding: 13px;
-    border-radius: 10px;
-    text-align: center;
-    text-decoration: none;
-    color: #fca5a5;
-    border: 1px solid rgba(255,255,255,0.1);
-    transition: transform 140ms var(--ease-out);
-}
-
-.logout-button:active {
-    transform: scale(0.97);
-}
-
-
-/* MAIN */
-
-.main {
-    margin-left: 270px;
-    min-height: 100vh;
-    min-height: 100svh;
-}
-
-
-/* TOPBAR */
-
-.topbar {
-    height: 90px;
-    height: calc(90px + env(safe-area-inset-top, 0px));
-    background: white;
-    border-bottom: 1px solid #e5e7eb;
-    padding: 0 35px;
-    padding-top: env(safe-area-inset-top, 0px);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    position: sticky;
-    top: 0;
-    z-index: 900;
-}
-
-.topbar-left h1 {
-    font-size: 22px;
-    margin-bottom: 4px;
-}
-
-.topbar-left p {
-    font-size: 13px;
-    color: #6b7280;
-}
-
-.admin-profile {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-
-.admin-avatar {
-    width: 43px;
-    height: 43px;
-    border-radius: 50%;
-    object-fit: cover;
-    background: #111827;
-    color: white;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.admin-info strong {
-    display: block;
-    font-size: 13px;
-}
-
-.admin-info span {
-    font-size: 11px;
-    color: #9ca3af;
-}
-
-
-/* CONTENT */
-
-.content {
-    padding: 35px;
-}
-
-
-/* HEADER */
-
-.page-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 28px;
-}
-
-.page-header h2 {
-    font-size: 24px;
-    margin-bottom: 6px;
-}
-
-.page-header p {
-    color: #6b7280;
-    font-size: 13px;
-}
-
-
-/* STATS */
-
-.stats-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 18px;
-    margin-bottom: 28px;
-}
-
-.stat-card {
-    background: white;
-    border-radius: 18px;
-    padding: 22px;
-    border: 1px solid #e5e7eb;
-    box-shadow: 0 8px 22px rgba(0,0,0,0.04);
-}
-
-.stat-card span {
-    color: #6b7280;
-    font-size: 12px;
-}
-
-.stat-card h3 {
-    font-size: 28px;
-    margin-top: 8px;
-}
-
-
-/* FILTERS */
-
-.filters {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 9px;
-    margin-bottom: 20px;
-}
-
-.filter-btn {
-    text-decoration: none;
-    color: #374151;
-    background: white;
-    padding: 10px 15px;
-    border-radius: 9px;
-    border: 1px solid #e5e7eb;
-    font-size: 13px;
-    transition: transform 140ms var(--ease-out);
-}
-
-.filter-btn:active {
-    transform: scale(0.97);
-}
-
-.filter-btn.active {
-    background: #111827;
-    color: white;
-}
-
-
-/* TABLE CARD */
-
-.table-card {
-    background: white;
-    border-radius: 20px;
-    border: 1px solid #e5e7eb;
-    overflow: hidden;
-    box-shadow: 0 8px 25px rgba(0,0,0,0.04);
-}
-
-.table-header {
-    padding: 22px;
-    border-bottom: 1px solid #e5e7eb;
-}
-
-.table-header h3 {
-    font-size: 18px;
-}
-
-.table-wrapper {
-    overflow-x: auto;
-    overscroll-behavior-x: contain;
-}
-
-table {
-    width: 100%;
-    min-width: 1250px;
-    border-collapse: collapse;
-}
-
-thead {
-    background: #f9fafb;
-}
-
-th {
-    padding: 14px 18px;
-    text-align: left;
-    font-size: 11px;
-    color: #6b7280;
-    text-transform: uppercase;
-}
-
-td {
-    padding: 17px 18px;
-    border-top: 1px solid #f0f1f3;
-    font-size: 13px;
-    vertical-align: middle;
-}
-
-
-/* CUSTOMER */
-
-.customer-info {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-
-.customer-image {
-    width: 42px;
-    height: 42px;
-    border-radius: 50%;
-    object-fit: cover;
-    background: #e5e7eb;
-}
-
-.customer-placeholder {
-    width: 42px;
-    height: 42px;
-    border-radius: 50%;
-    background: #e5e7eb;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.customer-name {
-    font-weight: bold;
-    margin-bottom: 3px;
-}
-
-.customer-email {
-    font-size: 11px;
-    color: #9ca3af;
-}
-
-
-/* STATUS */
-
-.status {
-    display: inline-block;
-    padding: 6px 11px;
-    border-radius: 20px;
-    font-size: 11px;
-    font-weight: bold;
-}
-
-.pending {
-    background: #fef3c7;
-    color: #92400e;
-}
-
-.confirmed {
-    background: #d1fae5;
-    color: #065f46;
-}
-
-.declined {
-    background: #fee2e2;
-    color: #991b1b;
-}
-
-.cancelled {
-    background: #e5e7eb;
-    color: #374151;
-}
-
-.completed {
-    background: #dbeafe;
-    color: #1e40af;
-}
-
-
-/* PAYMENT */
-
-.payment {
-    display: inline-block;
-    padding: 5px 10px;
-    border-radius: 20px;
-    background: #f3f4f6;
-    font-size: 11px;
-}
-
-.payment.verified {
-    background: #d1fae5;
-    color: #065f46;
-}
-
-.payment.pending {
-    background: #fef3c7;
-    color: #92400e;
-}
-
-.payment.rejected {
-    background: #fee2e2;
-    color: #991b1b;
-}
-
-
-/* BUTTONS */
-
-.actions {
-    display: flex;
-    gap: 7px;
-    flex-wrap: wrap;
-}
-
-.btn {
-    border: none;
-    padding: 8px 11px;
-    border-radius: 7px;
-    font-size: 11px;
-    cursor: pointer;
-    color: white;
-    transition: transform 140ms var(--ease-out);
-}
-
-.btn:active:not(:disabled) {
-    transform: scale(0.97);
-}
-
-.btn-confirm {
-    background: #16a34a;
-}
-
-.btn-decline {
-    background: #dc2626;
-}
-
-.btn-complete {
-    background: #2563eb;
-}
-
-
-/* EMPTY */
-
-.empty {
-    padding: 45px;
-    text-align: center;
-    color: #6b7280;
-}
-
-
-/* MOBILE */
-
-.mobile-toggle {
-    display: none;
-    background: #111827;
-    color: white;
-    border: none;
-    border-radius: 8px;
-    padding: 9px 12px;
-    font-size: 18px;
-    transition: transform 140ms var(--ease-out);
-}
-
-.mobile-toggle:active {
-    transform: scale(0.97);
-}
-
-@media (max-width: 1100px) {
-
-    .stats-grid {
-        grid-template-columns: repeat(2, 1fr);
-    }
-}
-
-@media (max-width: 850px) {
-
-    .sidebar {
-        transform: translateX(-100%);
-        transition: transform 280ms var(--ease-drawer);
+    .res-number {
+        color: var(--text-3);
+        font-variant-numeric: tabular-nums;
     }
 
-    .sidebar.show {
-        transform: translateX(0);
+    .wait-note {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--text-3);
+        font-size: 12.5px;
+        white-space: nowrap;
     }
 
-    .main {
-        margin-left: 0;
+    @media (max-width: 767px) {
+        .wait-note {
+            white-space: normal;
+        }
     }
-
-    .mobile-toggle {
-        display: block;
-    }
-
-    .topbar {
-        padding: 0 20px;
-        padding-top: env(safe-area-inset-top, 0px);
-        padding-left: max(20px, env(safe-area-inset-left, 0px));
-        padding-right: max(20px, env(safe-area-inset-right, 0px));
-    }
-
-    .content {
-        padding: 20px;
-        padding-left: max(20px, env(safe-area-inset-left, 0px));
-        padding-right: max(20px, env(safe-area-inset-right, 0px));
-        padding-bottom: max(20px, env(safe-area-inset-bottom, 0px));
-    }
-
-    .admin-info {
-        display: none;
-    }
-}
-
-@media (max-width: 600px) {
-
-    .stats-grid {
-        grid-template-columns: 1fr;
-    }
-
-    .page-header {
-        align-items: flex-start;
-        flex-direction: column;
-        gap: 10px;
-    }
-}
-
-
-/* REDUCED MOTION (fewer and gentler, not zero) */
-
-@media (prefers-reduced-motion: reduce) {
-
-    html {
-        scroll-behavior: auto;
-    }
-
-    .btn:active,
-    .filter-btn:active,
-    .logout-button:active,
-    .mobile-toggle:active {
-        transform: none !important;
-    }
-
-    *,
-    *::before,
-    *::after {
-        animation-duration: 1ms !important;
-        animation-iteration-count: 1 !important;
-    }
-}
-
-@media (prefers-reduced-motion: reduce) and (max-width: 850px) {
-
-    /* drawer fades in place instead of sliding */
-    .sidebar {
-        opacity: 0;
-        transition:
-            opacity 200ms ease,
-            transform 0s linear 200ms;
-    }
-
-    .sidebar.show {
-        opacity: 1;
-        transition:
-            opacity 200ms ease,
-            transform 0s;
-    }
-}
-
 </style>
+<?php admin_shell_body(); ?>
 
-<?php $glassTheme = "admin"; require __DIR__ . "/../includes/glass.php"; ?>
-</head>
+<div class="stack">
 
-<body>
+    <!-- NUMBERS -->
+
+    <section class="stats stats-compact" aria-label="All reservations">
+
+        <a class="stat tone-blue" href="reservations.php">
+            <div class="stat-main">
+                <div class="stat-label">All reservations</div>
+                <div class="stat-value"><?= number_format($totals["all"]) ?></div>
+                <div class="stat-note">Since the beginning</div>
+            </div>
+            <div class="stat-icon"><?= icon("clipboard") ?></div>
+        </a>
+
+        <a class="stat tone-amber" href="reservations.php?status=pending">
+            <div class="stat-main">
+                <div class="stat-label">Pending</div>
+                <div class="stat-value"><?= number_format($totals["pending"]) ?></div>
+                <div class="stat-note">Waiting for payment</div>
+            </div>
+            <div class="stat-icon"><?= icon("clock") ?></div>
+        </a>
+
+        <a class="stat tone-green" href="reservations.php?status=confirmed">
+            <div class="stat-main">
+                <div class="stat-label">Confirmed</div>
+                <div class="stat-value"><?= number_format($totals["confirmed"]) ?></div>
+                <div class="stat-note">Paid, stay still to come</div>
+            </div>
+            <div class="stat-icon"><?= icon("check-circle") ?></div>
+        </a>
+
+        <a class="stat tone-violet" href="reservations.php?status=completed">
+            <div class="stat-main">
+                <div class="stat-label">Completed</div>
+                <div class="stat-value"><?= number_format($totals["completed"]) ?></div>
+                <div class="stat-note">Guests who have stayed</div>
+            </div>
+            <div class="stat-icon"><?= icon("star") ?></div>
+        </a>
+
+    </section>
 
 
-<!-- SIDEBAR -->
+    <div>
 
-<aside
-    class="sidebar"
-    id="sidebar"
->
+        <!-- FILTERS -->
 
-    <div class="sidebar-logo">
+        <div class="page-bar">
+            <nav class="tabs" aria-label="Status">
+                <?php foreach ($statuses as $status): ?>
+                    <a
+                        class="tab<?= $statusFilter === $status ? " is-active" : "" ?>"
+                        href="<?= h($here(["status" => $status, "page" => 1])) ?>"
+                        <?= $statusFilter === $status ? 'aria-current="page"' : "" ?>
+                    >
+                        <?= ucfirst($status) ?>
+                        <span class="tab-count"><?= number_format($tabCounts[$status]) ?></span>
+                    </a>
+                <?php endforeach; ?>
+            </nav>
 
-        <div class="logo-icon">
-            <?= icon("home") ?>
+            <form class="filter-form" method="get" role="search">
+                <?php if ($statusFilter !== "all"): ?>
+                    <input type="hidden" name="status" value="<?= h($statusFilter) ?>">
+                <?php endif; ?>
+                <div class="filter-search">
+                    <?= icon("search") ?>
+                    <label class="sr-only" for="q">Search reservations</label>
+                    <input
+                        class="input"
+                        type="search"
+                        id="q"
+                        name="q"
+                        value="<?= h($search) ?>"
+                        placeholder="Guest, room or #number"
+                        autocomplete="off"
+                        enterkeyhint="search"
+                    >
+                </div>
+                <button class="btn" type="submit">Search</button>
+            </form>
         </div>
 
-        <div class="logo-text">
-            <h2>ARVE'S House</h2>
-            <span>Administration</span>
-        </div>
-
-    </div>
-
-
-    <div class="sidebar-menu">
-
-        <div class="menu-title">
-            Main
-        </div>
-
-        <a href="dashboard.php" class="menu-item">
-            <span class="menu-icon"><?= icon("chart") ?></span>
-            Dashboard
-        </a>
-
-        <a href="reservations.php" class="menu-item active">
-            <span class="menu-icon"><?= icon("calendar") ?></span>
-            Reservations
-        </a>
-
-        <a href="calendar.php" class="menu-item">
-            <span class="menu-icon"><?= icon("calendar") ?></span>
-            Calendar
-        </a>
-
-        <a href="rooms.php" class="menu-item">
-            <span class="menu-icon"><?= icon("bed") ?></span>
-            Rooms
-        </a>
-
-        <a href="payment.php" class="menu-item">
-            <span class="menu-icon"><?= icon("credit-card") ?></span>
-            Payments
-        </a>
+        <?php if ($search !== ""): ?>
+            <p class="filter-note">
+                <?= number_format($tabCounts[$statusFilter]) ?>
+                <?= $tabCounts[$statusFilter] === 1 ? "reservation matches" : "reservations match" ?>
+                “<?= h($search) ?>”.
+                <a href="<?= h($here(["q" => "", "page" => 1])) ?>">Clear the search</a>
+            </p>
+        <?php endif; ?>
 
 
-        <div class="menu-title">
-            Management
-        </div>
+        <!-- TABLE -->
 
-        <a href="customers.php" class="menu-item">
-            <span class="menu-icon"><?= icon("users") ?></span>
-            Customers
-        </a>
+        <section class="card">
 
-        <a href="messages.php" class="menu-item">
-            <span class="menu-icon"><?= icon("mail") ?></span>
-            Messages
-            <?php if ($chatUnread > 0): ?>
-                <span style="margin-left:auto;min-width:20px;height:20px;padding:0 6px;border-radius:999px;background:#dc2626;color:#fff;font-size:11px;font-weight:800;line-height:20px;text-align:center"><?= $chatUnread > 9 ? "9+" : $chatUnread ?></span>
+            <?php if ($reservations): ?>
+
+                <div class="table-wrap">
+                    <table class="table table-stack">
+                        <thead>
+                            <tr>
+                                <th>Guest</th>
+                                <th>Room</th>
+                                <th>Stay</th>
+                                <th class="right hide-narrow">Guests</th>
+                                <th class="right">Amount</th>
+                                <th>Payment</th>
+                                <th>Status</th>
+                                <th class="hide-narrow">Booked</th>
+                                <th class="right">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($reservations as $reservation): ?>
+                                <?php
+                                $id = (int) $reservation["id"];
+                                $status = $reservation["status"];
+                                $paymentStatus = $reservation["payment_status"] ?? null;
+                                $nights = (int) $reservation["total_nights"];
+                                ?>
+                                <tr>
+                                    <td class="cell-lead">
+                                        <div class="person">
+                                            <?= admin_avatar(["full_name" => $reservation["customer_name"], "profile_image" => $reservation["profile_image"]], 34) ?>
+                                            <div class="person-text">
+                                                <span class="person-name"><?= h($reservation["customer_name"]) ?></span>
+                                                <span class="person-sub"><span class="res-number">#<?= $id ?></span> · <?= h($reservation["customer_email"]) ?></span>
+                                            </div>
+                                        </div>
+                                    </td>
+
+                                    <td data-label="Room" class="cell-clip"><?= h($reservation["room_name"]) ?></td>
+
+                                    <td data-label="Stay" class="nowrap">
+                                        <?= h(admin_stay($reservation["check_in"], $reservation["check_out"])) ?>
+                                        <span class="cell-sub"><?= $nights ?> <?= $nights === 1 ? "night" : "nights" ?></span>
+                                    </td>
+
+                                    <td data-label="Guests" class="right num hide-narrow"><?= (int) $reservation["guests"] ?></td>
+
+                                    <td data-label="Amount" class="right num strong"><?= h(peso($reservation["total_amount"])) ?></td>
+
+                                    <td data-label="Payment">
+                                        <?php if ($paymentStatus): ?>
+                                            <?= status_pill($paymentStatus) ?>
+                                            <span class="cell-sub"><?= h(payment_method_label((string) $reservation["payment_method"])) ?></span>
+                                        <?php else: ?>
+                                            <?= status_pill("not set up", "Not paid") ?>
+                                        <?php endif; ?>
+                                    </td>
+
+                                    <td data-label="Status"><?= status_pill($status) ?></td>
+
+                                    <td data-label="Booked" class="nowrap soft hide-narrow"><?= h(admin_date($reservation["created_at"])) ?></td>
+
+                                    <td class="cell-wide">
+                                        <div class="table-actions">
+
+                                            <button class="btn btn-sm btn-ghost" type="button" data-dialog-open="reservation-<?= $id ?>">Details</button>
+
+                                            <?php if ($status === "pending" && $paymentStatus === "pending"): ?>
+
+                                                <?php if (admin_can("payments")): ?>
+                                                    <a class="btn btn-sm btn-soft" href="payment.php?q=%23<?= $id ?>">Check payment</a>
+                                                <?php else: ?>
+                                                    <span class="wait-note"><?= icon("clock", 14) ?> Payment being checked</span>
+                                                <?php endif; ?>
+
+                                            <?php elseif ($status === "pending" && $paymentStatus !== "verified"): ?>
+
+                                                <form class="inline-form" method="post" action="<?= h($here()) ?>"
+                                                    data-confirm="Reservation #<?= $id ?> of <?= h($reservation["customer_name"]) ?> will be declined and its dates open up for other guests. This cannot be undone."
+                                                    data-confirm-title="Decline this reservation?"
+                                                    data-confirm-ok="Decline"
+                                                    data-confirm-tone="danger"
+                                                >
+                                                    <?= csrf_field() ?>
+                                                    <input type="hidden" name="reservation_id" value="<?= $id ?>">
+                                                    <input type="hidden" name="action" value="decline">
+                                                    <button class="btn btn-sm btn-danger-soft" type="submit">Decline</button>
+                                                </form>
+
+                                            <?php elseif ($status === "confirmed"): ?>
+
+                                                <form class="inline-form" method="post" action="<?= h($here()) ?>"
+                                                    data-confirm="Mark reservation #<?= $id ?> of <?= h($reservation["customer_name"]) ?> as completed? Do this after the guest has checked out."
+                                                    data-confirm-title="Stay completed?"
+                                                    data-confirm-ok="Mark as completed"
+                                                >
+                                                    <?= csrf_field() ?>
+                                                    <input type="hidden" name="reservation_id" value="<?= $id ?>">
+                                                    <input type="hidden" name="action" value="complete">
+                                                    <button class="btn btn-sm btn-primary" type="submit">Complete</button>
+                                                </form>
+
+                                            <?php endif; ?>
+
+                                        </div>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+
+                <?= admin_pager($paging, fn (int $page) => $here(["page" => $page]), "reservations") ?>
+
+            <?php else: ?>
+
+                <div class="empty">
+                    <div class="empty-icon"><?= icon("calendar", 22) ?></div>
+                    <h3>No reservations found</h3>
+                    <p>
+                        <?= $search !== "" || $statusFilter !== "all"
+                            ? "Nothing matches what you picked."
+                            : "Bookings show up here as soon as a guest makes one." ?>
+                    </p>
+                    <?php if ($search !== "" || $statusFilter !== "all"): ?>
+                        <a class="btn" href="reservations.php">Show all reservations</a>
+                    <?php endif; ?>
+                </div>
+
             <?php endif; ?>
-        </a>
 
-
-        <a
-            href="../index.php"
-            target="_blank"
-            class="menu-item"
-        >
-            <span class="menu-icon"><?= icon("globe") ?></span>
-            View Website
-        </a>
+        </section>
 
     </div>
-
-
-    <div class="sidebar-footer">
-
-        <a
-            href="../logout.php"
-            class="logout-button"
-        >
-            <?= icon("log-out") ?> Logout
-        </a>
-
-    </div>
-
-</aside>
-
-
-<!-- MAIN -->
-
-<main class="main">
-
-
-<header class="topbar">
-
-    <div
-        style="
-            display:flex;
-            align-items:center;
-            gap:15px;
-        "
-    >
-
-        <button
-            class="mobile-toggle"
-            onclick="toggleSidebar()"
-            aria-label="Toggle menu"
-            aria-controls="sidebar"
-        >
-            <?= icon("menu") ?>
-        </button>
-
-        <div class="topbar-left">
-
-            <h1>
-                Reservations
-            </h1>
-
-            <p>
-                Manage all customer bookings
-            </p>
-
-        </div>
-
-    </div>
-
-
-    <div class="admin-profile">
-
-        <?php if (!empty($admin["profile_image"])): ?>
-
-            <img
-                src="../<?= htmlspecialchars(
-                    $admin["profile_image"]
-                ) ?>"
-                class="admin-avatar"
-                alt="Admin"
-            >
-
-        <?php else: ?>
-
-            <div class="admin-avatar">
-                A
-            </div>
-
-        <?php endif; ?>
-
-        <div class="admin-info">
-
-            <strong>
-                <?= htmlspecialchars(
-                    $admin["full_name"]
-                    ?? "Administrator"
-                ) ?>
-            </strong>
-
-            <span>
-                Administrator
-            </span>
-
-        </div>
-
-    </div>
-
-</header>
-
-
-<div class="content">
-
-
-    <div class="page-header">
-
-        <div>
-
-            <h2>
-                Reservation Management
-            </h2>
-
-            <p>
-                Confirm, decline and complete reservations.
-            </p>
-
-        </div>
-
-    </div>
-
-
-    <!-- STATS -->
-
-    <div class="stats-grid">
-
-        <div class="stat-card">
-
-            <span>
-                Total Reservations
-            </span>
-
-            <h3>
-                <?= $totalReservations ?>
-            </h3>
-
-        </div>
-
-
-        <div class="stat-card">
-
-            <span>
-                Pending
-            </span>
-
-            <h3>
-                <?= $totalPending ?>
-            </h3>
-
-        </div>
-
-
-        <div class="stat-card">
-
-            <span>
-                Confirmed
-            </span>
-
-            <h3>
-                <?= $totalConfirmed ?>
-            </h3>
-
-        </div>
-
-
-        <div class="stat-card">
-
-            <span>
-                Completed
-            </span>
-
-            <h3>
-                <?= $totalCompleted ?>
-            </h3>
-
-        </div>
-
-    </div>
-
-
-    <!-- FILTERS -->
-
-    <div class="filters">
-
-        <?php foreach ($allowedFilters as $filter): ?>
-
-            <a
-                href="?status=<?= urlencode($filter) ?>"
-                class="filter-btn
-                <?= $statusFilter === $filter
-                    ? "active"
-                    : ""
-                ?>"
-            >
-                <?= ucfirst($filter) ?>
-            </a>
-
-        <?php endforeach; ?>
-
-    </div>
-
-
-    <!-- TABLE -->
-
-    <div class="table-card">
-
-        <div class="table-header">
-
-            <h3>
-                Reservations
-            </h3>
-
-        </div>
-
-
-        <?php if (count($reservations) > 0): ?>
-
-            <div class="table-wrapper">
-
-                <table>
-
-                    <thead>
-
-                        <tr>
-
-                            <th>ID</th>
-
-                            <th>Customer</th>
-
-                            <th>Room</th>
-
-                            <th>Check-in</th>
-
-                            <th>Check-out</th>
-
-                            <th>Guests</th>
-
-                            <th>Total</th>
-
-                            <th>Reservation</th>
-
-                            <th>Payment</th>
-
-                            <th>Action</th>
-
-                        </tr>
-
-                    </thead>
-
-
-                    <tbody>
-
-                    <?php foreach ($reservations as $reservation): ?>
-
-                        <?php
-                        $status = $reservation["status"];
-                        $paymentStatus =
-                            $reservation["payment_status"]
-                            ?? null;
-                        ?>
-
-                        <tr>
-
-                            <td>
-                                #<?= (int) $reservation["id"] ?>
-                            </td>
-
-
-                            <td>
-
-                                <div class="customer-info">
-
-                                    <?php if (
-                                        !empty(
-                                            $reservation["profile_image"]
-                                        )
-                                    ): ?>
-
-                                        <img
-                                            src="../<?= htmlspecialchars(
-                                                $reservation[
-                                                    "profile_image"
-                                                ]
-                                            ) ?>"
-                                            class="customer-image"
-                                            alt="Profile"
-                                        >
-
-                                    <?php else: ?>
-
-                                        <div class="customer-placeholder">
-                                            <?= icon("user") ?>
-                                        </div>
-
-                                    <?php endif; ?>
-
-
-                                    <div>
-
-                                        <div class="customer-name">
-
-                                            <?= htmlspecialchars(
-                                                $reservation[
-                                                    "customer_name"
-                                                ]
-                                                ?? "Customer"
-                                            ) ?>
-
-                                        </div>
-
-                                        <div class="customer-email">
-
-                                            <?= htmlspecialchars(
-                                                $reservation[
-                                                    "customer_email"
-                                                ]
-                                                ?? ""
-                                            ) ?>
-
-                                        </div>
-
-                                    </div>
-
-                                </div>
-
-                            </td>
-
-
-                            <td>
-
-                                <?= htmlspecialchars(
-                                    $reservation["room_name"]
-                                ) ?>
-
-                            </td>
-
-
-                            <td>
-
-                                <?= htmlspecialchars(
-                                    $reservation["check_in"]
-                                ) ?>
-
-                            </td>
-
-
-                            <td>
-
-                                <?= htmlspecialchars(
-                                    $reservation["check_out"]
-                                ) ?>
-
-                            </td>
-
-
-                            <td>
-
-                                <?= (int) $reservation["guests"] ?>
-
-                            </td>
-
-
-                            <td>
-
-                                <strong>
-
-                                    ₱<?= number_format(
-                                        (float)
-                                        $reservation[
-                                            "total_amount"
-                                        ],
-                                        2
-                                    ) ?>
-
-                                </strong>
-
-                            </td>
-
-
-                            <td>
-
-                                <span
-                                    class="status <?= htmlspecialchars(
-                                        $status
-                                    ) ?>"
-                                >
-
-                                    <?= ucfirst(
-                                        htmlspecialchars(
-                                            $status
-                                        )
-                                    ) ?>
-
-                                </span>
-
-                            </td>
-
-
-                            <td>
-
-                                <?php if ($paymentStatus): ?>
-
-                                    <span
-                                        class="payment <?= htmlspecialchars(
-                                            $paymentStatus
-                                        ) ?>"
-                                    >
-
-                                        <?= ucfirst(
-                                            htmlspecialchars(
-                                                $paymentStatus
-                                            )
-                                        ) ?>
-
-                                    </span>
-
-                                <?php else: ?>
-
-                                    <span class="payment">
-                                        Not Paid
-                                    </span>
-
-                                <?php endif; ?>
-
-                            </td>
-
-
-                            <td>
-
-                                <div class="actions">
-
-
-                                <?php if ($status === "pending"): ?>
-
-                                    <?php if ($paymentStatus === "verified"): ?>
-
-                                        <span class="payment verified">
-                                            Auto Confirmed
-                                        </span>
-
-                                    <?php elseif ($paymentStatus === "pending"): ?>
-
-                                        <span class="payment pending">
-                                            Waiting for Payment Verification
-                                        </span>
-
-                                    <?php elseif ($paymentStatus === "rejected"): ?>
-
-                                        <span class="payment rejected">
-                                            Payment Rejected
-                                        </span>
-
-                                        <form
-                                            method="POST"
-                                            onsubmit="
-                                                return confirm(
-                                                    'Decline this reservation?'
-                                                );
-                                            "
-                                        >
-
-                                        <input
-                                            type="hidden"
-                                            name="reservation_id"
-                                            value="<?= (int)
-                                                $reservation["id"]
-                                            ?>"
-                                        >
-
-                                        <input
-                                            type="hidden"
-                                            name="action"
-                                            value="decline"
-                                        >
-
-                                            <button
-                                                class="btn btn-decline"
-                                                type="submit"
-                                            >
-                                                Decline
-                                            </button>
-
-                                        </form>
-
-                                    <?php else: ?>
-
-                                        <span class="payment">
-                                            Waiting for Payment
-                                        </span>
-
-                                        <form
-                                            method="POST"
-                                            onsubmit="
-                                                return confirm(
-                                                    'Decline this reservation?'
-                                                );
-                                            "
-                                        >
-
-                                            <input
-                                                type="hidden"
-                                                name="reservation_id"
-                                                value="<?= (int)
-                                                    $reservation["id"]
-                                                ?>"
-                                            >
-
-                                            <input
-                                                type="hidden"
-                                                name="action"
-                                                value="decline"
-                                            >
-
-                                            <button
-                                                type="submit"
-                                                class="btn btn-decline"
-                                            >
-                                                Decline
-                                            </button>
-
-                                        </form>
-
-                                    <?php endif; ?>
-
-
-                                <?php elseif (
-                                    $status === "confirmed"
-                                ): ?>
-
-
-                                    <form
-                                        method="POST"
-                                        onsubmit="
-                                            return confirm(
-                                                'Mark this reservation completed?'
-                                            );
-                                        "
-                                    >
-
-                                        <input
-                                            type="hidden"
-                                            name="reservation_id"
-                                            value="<?= (int)
-                                                $reservation["id"]
-                                            ?>"
-                                        >
-
-                                        <input
-                                            type="hidden"
-                                            name="action"
-                                            value="complete"
-                                        >
-
-                                        <button
-                                            class="btn btn-complete"
-                                            type="submit"
-                                        >
-                                            Complete
-                                        </button>
-
-                                    </form>
-
-
-                                <?php else: ?>
-
-                                    —
-
-                                <?php endif; ?>
-
-
-                                </div>
-
-                            </td>
-
-                        </tr>
-
-                    <?php endforeach; ?>
-
-                    </tbody>
-
-                </table>
-
-            </div>
-
-
-        <?php else: ?>
-
-            <div class="empty">
-
-                <h3>
-                    No reservations found
-                </h3>
-
-                <p>
-                    Reservations matching this filter will appear here.
-                </p>
-
-            </div>
-
-        <?php endif; ?>
-
-    </div>
-
 
 </div>
 
-</main>
 
+<!-- DETAILS, ONE WINDOW PER ROW -->
 
-<script>
+<?php foreach ($reservations as $reservation): ?>
+    <?php
+    $id = (int) $reservation["id"];
+    $nights = (int) $reservation["total_nights"];
+    ?>
+    <dialog class="dialog dialog-wide" id="reservation-<?= $id ?>" aria-labelledby="reservation-<?= $id ?>-title">
+        <div class="dialog-head">
+            <h2 id="reservation-<?= $id ?>-title" tabindex="-1" autofocus>Reservation #<?= $id ?></h2>
+            <button class="btn btn-ghost btn-icon" type="button" data-dialog-close aria-label="Close"><?= icon("x") ?></button>
+        </div>
 
-function toggleSidebar() {
+        <div class="dialog-body">
+            <div class="person" style="margin-bottom:14px">
+                <?= admin_avatar(["full_name" => $reservation["customer_name"], "profile_image" => $reservation["profile_image"]], 44) ?>
+                <div class="person-text">
+                    <span class="person-name" style="max-width:none"><?= h($reservation["customer_name"]) ?></span>
+                    <span class="person-sub" style="max-width:none">
+                        <?= h($reservation["customer_email"]) ?><?= trim((string) $reservation["customer_phone"]) !== "" ? " · " . h($reservation["customer_phone"]) : "" ?>
+                    </span>
+                </div>
+            </div>
 
-    document
-        .getElementById("sidebar")
-        .classList
-        .toggle("show");
+            <dl class="kv">
+                <dt>Status</dt>
+                <dd><?= status_pill($reservation["status"]) ?></dd>
 
-}
+                <dt>Room</dt>
+                <dd><?= h($reservation["room_name"]) ?></dd>
 
-</script>
+                <dt>Check-in</dt>
+                <dd><?= h(admin_date($reservation["check_in"], "l, F j, Y")) ?></dd>
 
-</body>
-</html>
+                <dt>Check-out</dt>
+                <dd><?= h(admin_date($reservation["check_out"], "l, F j, Y")) ?></dd>
+
+                <dt>Nights</dt>
+                <dd><?= $nights ?></dd>
+
+                <dt>Guests</dt>
+                <dd><?= (int) $reservation["guests"] ?></dd>
+
+                <dt>Price per night</dt>
+                <dd><?= h(peso($reservation["price_per_night"], 2)) ?></dd>
+
+                <dt>Total</dt>
+                <dd class="strong"><?= h(peso($reservation["total_amount"], 2)) ?></dd>
+
+                <dt>Payment</dt>
+                <dd>
+                    <?php if ($reservation["payment_status"]): ?>
+                        <?= status_pill($reservation["payment_status"]) ?>
+                        <?= h(payment_method_label((string) $reservation["payment_method"])) ?>
+                    <?php else: ?>
+                        Not paid yet
+                    <?php endif; ?>
+                </dd>
+
+                <dt>Booked on</dt>
+                <dd><?= h(admin_date($reservation["created_at"], "M j, Y · g:i A")) ?></dd>
+
+                <?php if (!empty($reservation["terms_accepted_at"])): ?>
+                    <dt>Terms accepted</dt>
+                    <dd><?= h(activity_time($reservation["terms_accepted_at"])) ?></dd>
+                <?php endif; ?>
+            </dl>
+        </div>
+
+        <div class="dialog-actions">
+            <?php if (admin_can("messages")): ?>
+                <a class="btn" href="messages.php?customer=<?= (int) $reservation["user_id"] ?>"><?= icon("message") ?> Message guest</a>
+            <?php endif; ?>
+            <?php if ($reservation["payment_id"] && admin_can("payments")): ?>
+                <a class="btn" href="payment.php?q=%23<?= $id ?>"><?= icon("credit-card") ?> Open payment</a>
+            <?php endif; ?>
+            <button class="btn btn-primary" type="button" data-dialog-close>Close</button>
+        </div>
+    </dialog>
+<?php endforeach; ?>
+
+<?php admin_shell_end(); ?>

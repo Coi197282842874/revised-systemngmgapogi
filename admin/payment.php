@@ -2,43 +2,54 @@
 session_start();
 
 require_once __DIR__ . "/../config/database.php";
-require_once __DIR__ . "/../includes/icons.php";
-require_once __DIR__ . "/../includes/chat.php";
+require_once __DIR__ . "/../includes/admin-shell.php";
 require_once __DIR__ . "/../includes/paymongo.php";
 
-ensure_chat_schema($pdo);
-$chatUnread = chat_unread_for_admins($pdo);
+$admin = admin_boot($pdo, "payments");
 
-
-// ======================================================
-// ADMIN CHECK
-// ======================================================
-
-if (
-    !isset($_SESSION["user_id"]) ||
-    ($_SESSION["role"] ?? "") !== "admin"
-) {
-    header("Location: ../login.php");
-    exit;
-}
+const PAYMENTS_PER_PAGE = 25;
 
 // Online (PayMongo) payments confirm themselves; bring any unfinished ones up to date
 paymongo_settle_pending($pdo);
 
 
 // ======================================================
-// HANDLE PAYMENT ACTIONS
+// FILTERS: ?status=  ?q=  ?page=
+// q: "#12" or a short number finds the payments of reservation 12 (and payment 12); anything else is
+// looked up in the reference number, the guest's name and the guest's email.
+// ======================================================
+
+$statuses = ["all", "pending", "verified", "rejected", "cancelled"];
+
+$statusFilter = $_GET["status"] ?? "all";
+
+if (!in_array($statusFilter, $statuses, true)) {
+    $statusFilter = "all";
+}
+
+$search = admin_query();
+
+$here = fn (array $change = []) => admin_url(
+    "payment.php",
+    $change + ["status" => $statusFilter, "q" => $search, "page" => (int) ($_GET["page"] ?? 1)]
+);
+
+
+// ======================================================
+// VERIFY / REJECT
 // ======================================================
 
 if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
-    $payment_id =
-        (int) ($_POST["payment_id"] ?? 0);
+    $paymentId = (int) ($_POST["payment_id"] ?? 0);
+    $action = $_POST["action"] ?? "";
 
-    $action =
-        $_POST["action"] ?? "";
+    if (!admin_check_csrf()) {
+        admin_flash("Your session expired. Please try again.", "error");
+    } elseif ($paymentId > 0 && in_array($action, ["verify", "reject"], true)) {
 
-    if ($payment_id > 0) {
+        $changed = false;
+        $payment = null;
 
         try {
 
@@ -46,63 +57,38 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
             $stmt = $pdo->prepare("
                 SELECT
-                    id,
-                    reservation_id,
-                    user_id,
-                    status
+                    payments.id,
+                    payments.reservation_id,
+                    payments.user_id,
+                    payments.amount,
+                    payments.status,
+                    users.full_name AS customer_name
                 FROM payments
-                WHERE id = ?
+                INNER JOIN users ON users.id = payments.user_id
+                WHERE payments.id = ?
                 LIMIT 1
             ");
 
-            $stmt->execute([
-                $payment_id
-            ]);
+            $stmt->execute([$paymentId]);
+            $payment = $stmt->fetch();
 
-            $payment =
-                $stmt->fetch();
-
-            if (
-                $payment
-                && $payment["status"] === "pending"
-            ) {
+            if ($payment && $payment["status"] === "pending") {
 
                 if ($action === "verify") {
 
-                    $stmt = $pdo->prepare("
-                        UPDATE payments
-                        SET status = 'verified'
-                        WHERE id = ?
-                        AND status = 'pending'
-                    ");
+                    $stmt = $pdo->prepare("UPDATE payments SET status = 'verified' WHERE id = ? AND status = 'pending'");
+                    $stmt->execute([$paymentId]);
+                    $changed = $stmt->rowCount() > 0;
 
-                    $stmt->execute([
-                        $payment_id
-                    ]);
+                    // a verified payment confirms its reservation
+                    $stmt = $pdo->prepare("UPDATE reservations SET status = 'confirmed' WHERE id = ? AND status = 'pending'");
+                    $stmt->execute([$payment["reservation_id"]]);
 
-                    $stmt = $pdo->prepare("
-                        UPDATE reservations
-                        SET status = 'confirmed'
-                        WHERE id = ?
-                        AND status = 'pending'
-                    ");
+                } else {
 
-                    $stmt->execute([
-                        $payment["reservation_id"]
-                    ]);
-
-                } elseif ($action === "reject") {
-
-                    $stmt = $pdo->prepare("
-                        UPDATE payments
-                        SET status = 'rejected'
-                        WHERE id = ?
-                        AND status = 'pending'
-                    ");
-
-                    $stmt->execute([
-                        $payment_id
-                    ]);
+                    $stmt = $pdo->prepare("UPDATE payments SET status = 'rejected' WHERE id = ? AND status = 'pending'");
+                    $stmt->execute([$paymentId]);
+                    $changed = $stmt->rowCount() > 0;
                 }
             }
 
@@ -113,1487 +99,452 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             if ($pdo->inTransaction()) {
                 $pdo->rollBack();
             }
+
+            $changed = false;
+            $payment = null;
+            error_log("ARVE'S House payment " . $action . " failed: " . $exception->getMessage());
+            admin_flash("The payment could not be saved. Please try again.", "error");
+        }
+
+        if ($changed) {
+
+            $reservationId = (int) $payment["reservation_id"];
+            $amount = peso($payment["amount"], 2);
+
+            log_activity(
+                $pdo,
+                $action === "verify" ? "payment.verified" : "payment.rejected",
+                ($action === "verify" ? "Verified " : "Rejected ") . $payment["customer_name"]
+                    . "'s payment of " . $amount . " for reservation #" . $reservationId,
+                ["entity_type" => "payment", "entity_id" => $paymentId, "link" => "payment.php?q=%23" . $reservationId]
+            );
+
+            admin_flash(
+                $action === "verify"
+                    ? "Payment of " . $amount . " verified. Reservation #" . $reservationId . " is confirmed."
+                    : "Payment of " . $amount . " rejected. The guest can send a new payment for reservation #" . $reservationId . "."
+            );
+
+        } elseif ($payment) {
+            admin_flash("That payment was already " . $payment["status"] . ".", "error");
         }
     }
 
-    header("Location: payment.php");
+    header("Location: " . $here());
     exit;
 }
 
 
 // ======================================================
-// FILTER
+// NUMBERS ON TOP (all payments, whatever the filters)
 // ======================================================
 
-$statusFilter = $_GET["status"] ?? "all";
+$totals = array_fill_keys($statuses, 0);
 
-$allowedFilters = [
-    "all",
-    "pending",
-    "verified",
-    "rejected"
-];
+foreach ($pdo->query("SELECT status, COUNT(*) AS total FROM payments GROUP BY status") as $row) {
+    if (isset($totals[$row["status"]])) {
+        $totals[$row["status"]] = (int) $row["total"];
+    }
 
-if (!in_array($statusFilter, $allowedFilters, true)) {
-    $statusFilter = "all";
+    $totals["all"] += (int) $row["total"];
 }
 
+$verifiedAmount = (float) $pdo->query(
+    "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'verified'"
+)->fetchColumn();
 
-// ======================================================
-// COUNTS
-// ======================================================
-
-$stmt = $pdo->query("
-    SELECT COUNT(*)
-    FROM payments
-");
-$totalPayments = (int) $stmt->fetchColumn();
-
-
-$stmt = $pdo->query("
-    SELECT COUNT(*)
-    FROM payments
-    WHERE status = 'pending'
-");
-$pendingPayments = (int) $stmt->fetchColumn();
-
-
-$stmt = $pdo->query("
-    SELECT COUNT(*)
-    FROM payments
-    WHERE status = 'verified'
-");
-$verifiedPayments = (int) $stmt->fetchColumn();
-
-
-$stmt = $pdo->query("
-    SELECT COUNT(*)
-    FROM payments
-    WHERE status = 'rejected'
-");
-$rejectedPayments = (int) $stmt->fetchColumn();
-
-
-$stmt = $pdo->query("
-    SELECT COALESCE(SUM(amount), 0)
-    FROM payments
-    WHERE status = 'verified'
-");
-$totalVerifiedAmount = (float) $stmt->fetchColumn();
+$pendingAmount = (float) $pdo->query(
+    "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'pending'"
+)->fetchColumn();
 
 
 // ======================================================
-// GET PAYMENTS
+// THE LIST
 // ======================================================
 
-$sql = "
-    SELECT
-        payments.*,
-
-        reservations.id AS reservation_number,
-        reservations.check_in,
-        reservations.check_out,
-
-        rooms.room_name,
-
-        users.full_name AS customer_name,
-        users.email AS customer_email,
-        users.profile_image
-
+$from = "
     FROM payments
-
-    INNER JOIN reservations
-        ON payments.reservation_id = reservations.id
-
-    INNER JOIN rooms
-        ON reservations.room_id = rooms.id
-
-    INNER JOIN users
-        ON payments.user_id = users.id
+    INNER JOIN reservations ON payments.reservation_id = reservations.id
+    INNER JOIN rooms ON reservations.room_id = rooms.id
+    INNER JOIN users ON payments.user_id = users.id
 ";
 
+$where = [];
 $params = [];
 
+if ($search !== "") {
+    // "#12", or a short number: a reservation or payment number. Long numbers are references.
+    if (preg_match('/^#(\d{1,9})$/', $search, $match) || preg_match('/^(\d{1,4})$/', $search, $match)) {
+        $where[] = "(payments.reservation_id = ? OR payments.id = ?)";
+        array_push($params, (int) $match[1], (int) $match[1]);
+    } else {
+        $where[] = "(payments.reference_number LIKE ? OR users.full_name LIKE ? OR users.email LIKE ?)";
+        array_push($params, admin_like($search), admin_like($search), admin_like($search));
+    }
+}
+
+// the numbers on the tabs follow the search
+$tabCounts = array_fill_keys($statuses, 0);
+
+$stmt = $pdo->prepare(
+    "SELECT payments.status, COUNT(*) AS total" . $from
+    . ($where ? " WHERE " . implode(" AND ", $where) : "")
+    . " GROUP BY payments.status"
+);
+$stmt->execute($params);
+
+foreach ($stmt as $row) {
+    if (isset($tabCounts[$row["status"]])) {
+        $tabCounts[$row["status"]] = (int) $row["total"];
+    }
+
+    $tabCounts["all"] += (int) $row["total"];
+}
+
+// "Cancelled" (online payments the guest backed out of) only gets a tab when there are some
+$tabs = array_filter(
+    $statuses,
+    fn ($status) => $status !== "cancelled" || $totals["cancelled"] > 0 || $statusFilter === "cancelled"
+);
+
 if ($statusFilter !== "all") {
-
-    $sql .= "
-        WHERE payments.status = ?
-    ";
-
+    $where[] = "payments.status = ?";
     $params[] = $statusFilter;
 }
 
-$sql .= "
-    ORDER BY payments.created_at DESC
-";
-
-$stmt = $pdo->prepare($sql);
-$stmt->execute($params);
-
-$payments = $stmt->fetchAll();
-
-
-// ======================================================
-// ADMIN INFO
-// ======================================================
+$paging = admin_paginate($tabCounts[$statusFilter], PAYMENTS_PER_PAGE);
 
 $stmt = $pdo->prepare("
-    SELECT *
-    FROM users
-    WHERE id = ?
-    LIMIT 1
-");
+    SELECT
+        payments.*,
+        reservations.check_in,
+        reservations.check_out,
+        reservations.status AS reservation_status,
+        rooms.room_name,
+        users.full_name AS customer_name,
+        users.email AS customer_email,
+        users.phone AS customer_phone,
+        users.profile_image
+    " . $from
+    . ($where ? " WHERE " . implode(" AND ", $where) : "")
+    . " ORDER BY payments.created_at DESC, payments.id DESC
+        LIMIT " . $paging["per_page"] . " OFFSET " . $paging["offset"]
+);
 
-$stmt->execute([
-    $_SESSION["user_id"]
+$stmt->execute($params);
+$payments = $stmt->fetchAll();
+
+admin_shell_head([
+    "title" => "Payments",
+    "subtitle" => "Check what guests paid, then verify or reject it",
+    "active" => "payments",
 ]);
-
-$admin = $stmt->fetch();
 ?>
-
-<!DOCTYPE html>
-<html lang="en">
-
-<head>
-
-<meta charset="UTF-8">
-
-<meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0, viewport-fit=cover"
->
-
-<meta
-    name="theme-color"
-    content="#ffffff"
->
-
-<title>
-    Payments | ARVE'S House
-</title>
-
 <style>
-
-:root {
-    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
-    --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
-    --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
-}
-
-* {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-}
-
-html {
-    -webkit-tap-highlight-color: transparent;
-    -webkit-text-size-adjust: 100%;
-    text-size-adjust: 100%;
-}
-
-body {
-    font-family: Arial, sans-serif;
-    background: #f3f5f9;
-    color: #111827;
-}
-
-
-/* SIDEBAR */
-
-.sidebar {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 270px;
-    height: 100vh;
-    height: 100dvh;
-    background: linear-gradient(
-        180deg,
-        #111827,
-        #172033
-    );
-    color: white;
-    display: flex;
-    flex-direction: column;
-    z-index: 1000;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    padding-top: env(safe-area-inset-top, 0px);
-    padding-bottom: env(safe-area-inset-bottom, 0px);
-    padding-left: env(safe-area-inset-left, 0px);
-}
-
-.sidebar-logo {
-    height: 90px;
-    display: flex;
-    align-items: center;
-    padding: 0 28px;
-    border-bottom: 1px solid rgba(255,255,255,0.08);
-}
-
-.logo-icon {
-    width: 46px;
-    height: 46px;
-    border-radius: 14px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: #f59e0b;
-    color: #111827;
-    font-size: 22px;
-    margin-right: 12px;
-}
-
-.logo-text h2 {
-    font-size: 18px;
-}
-
-.logo-text span {
-    font-size: 11px;
-    color: #9ca3af;
-    text-transform: uppercase;
-    letter-spacing: 1.5px;
-}
-
-.sidebar-menu {
-    padding: 25px 18px;
-    flex: 1;
-}
-
-.menu-title {
-    color: #6b7280;
-    font-size: 11px;
-    font-weight: bold;
-    text-transform: uppercase;
-    letter-spacing: 1.5px;
-    padding: 0 14px;
-    margin: 15px 0 10px;
-}
-
-.menu-item {
-    display: flex;
-    align-items: center;
-    gap: 13px;
-    color: #cbd5e1;
-    text-decoration: none;
-    padding: 14px 16px;
-    border-radius: 12px;
-    margin-bottom: 7px;
-    touch-action: manipulation;
-    transition: transform 140ms var(--ease-out);
-}
-
-@media (hover: hover) and (pointer: fine) {
-
-    .menu-item:hover {
-        background: rgba(255,255,255,0.08);
-        color: white;
-    }
-}
-
-.menu-item:focus-visible {
-    background: rgba(255,255,255,0.08);
-    color: white;
-}
-
-.menu-item:active {
-    transform: scale(0.98);
-}
-
-.menu-item.active {
-    background: #f59e0b;
-    color: #111827;
-    font-weight: bold;
-}
-
-.menu-icon {
-    width: 28px;
-    text-align: center;
-}
-
-.sidebar-footer {
-    padding: 20px;
-    border-top: 1px solid rgba(255,255,255,0.08);
-}
-
-.logout-button {
-    display: block;
-    width: 100%;
-    padding: 13px;
-    border-radius: 10px;
-    text-align: center;
-    text-decoration: none;
-    color: #fca5a5;
-    border: 1px solid rgba(255,255,255,0.1);
-    touch-action: manipulation;
-    transition: transform 140ms var(--ease-out);
-}
-
-.logout-button:active {
-    transform: scale(0.97);
-}
-
-
-/* MAIN */
-
-.main {
-    margin-left: 270px;
-    min-height: 100vh;
-    min-height: 100svh;
-}
-
-
-/* TOPBAR */
-
-.topbar {
-    height: 90px;
-    height: calc(90px + env(safe-area-inset-top, 0px));
-    background: white;
-    border-bottom: 1px solid #e5e7eb;
-    padding: 0 35px;
-    padding-top: env(safe-area-inset-top, 0px);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    position: sticky;
-    top: 0;
-    z-index: 900;
-}
-
-.topbar-left h1 {
-    font-size: 22px;
-    margin-bottom: 4px;
-}
-
-.topbar-left p {
-    font-size: 13px;
-    color: #6b7280;
-}
-
-.admin-profile {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-
-.admin-avatar {
-    width: 43px;
-    height: 43px;
-    border-radius: 50%;
-    object-fit: cover;
-    background: #111827;
-    color: white;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.admin-info strong {
-    display: block;
-    font-size: 13px;
-}
-
-.admin-info span {
-    font-size: 11px;
-    color: #9ca3af;
-}
-
-
-/* CONTENT */
-
-.content {
-    padding: 35px;
-}
-
-
-/* PAGE HEADER */
-
-.page-header {
-    margin-bottom: 28px;
-}
-
-.page-header h2 {
-    font-size: 24px;
-    margin-bottom: 6px;
-}
-
-.page-header p {
-    color: #6b7280;
-    font-size: 13px;
-}
-
-
-/* STATS */
-
-.stats-grid {
-    display: grid;
-    grid-template-columns: repeat(5, 1fr);
-    gap: 18px;
-    margin-bottom: 28px;
-}
-
-.stat-card {
-    background: white;
-    border-radius: 18px;
-    padding: 22px;
-    border: 1px solid #e5e7eb;
-    box-shadow: 0 8px 22px rgba(0,0,0,0.04);
-}
-
-.stat-card span {
-    color: #6b7280;
-    font-size: 12px;
-}
-
-.stat-card h3 {
-    margin-top: 8px;
-    font-size: 27px;
-}
-
-.revenue-card {
-    background: linear-gradient(
-        135deg,
-        #111827,
-        #1f2937
-    );
-    color: white;
-}
-
-.revenue-card span {
-    color: #d1d5db;
-}
-
-
-/* FILTERS */
-
-.filters {
-    display: flex;
-    gap: 9px;
-    flex-wrap: wrap;
-    margin-bottom: 20px;
-}
-
-.filter-btn {
-    text-decoration: none;
-    color: #374151;
-    background: white;
-    padding: 10px 15px;
-    border-radius: 9px;
-    border: 1px solid #e5e7eb;
-    font-size: 13px;
-    touch-action: manipulation;
-    transition: transform 140ms var(--ease-out);
-}
-
-.filter-btn:active {
-    transform: scale(0.97);
-}
-
-.filter-btn.active {
-    background: #111827;
-    color: white;
-}
-
-
-/* TABLE */
-
-.table-card {
-    background: white;
-    border-radius: 20px;
-    overflow: hidden;
-    border: 1px solid #e5e7eb;
-    box-shadow: 0 8px 25px rgba(0,0,0,0.04);
-}
-
-.table-header {
-    padding: 22px;
-    border-bottom: 1px solid #e5e7eb;
-}
-
-.table-header h3 {
-    font-size: 18px;
-}
-
-.table-wrapper {
-    overflow-x: auto;
-    overscroll-behavior-x: contain;
-}
-
-table {
-    width: 100%;
-    min-width: 1350px;
-    border-collapse: collapse;
-}
-
-thead {
-    background: #f9fafb;
-}
-
-th {
-    padding: 14px 18px;
-    text-align: left;
-    font-size: 11px;
-    color: #6b7280;
-    text-transform: uppercase;
-}
-
-td {
-    padding: 17px 18px;
-    border-top: 1px solid #f0f1f3;
-    font-size: 13px;
-    vertical-align: middle;
-}
-
-@media (hover: hover) and (pointer: fine) {
-
-    tbody tr:hover {
-        background: #fafafa;
-    }
-}
-
-
-/* CUSTOMER */
-
-.customer-info {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-
-.customer-image {
-    width: 42px;
-    height: 42px;
-    border-radius: 50%;
-    object-fit: cover;
-    background: #e5e7eb;
-}
-
-.customer-placeholder {
-    width: 42px;
-    height: 42px;
-    border-radius: 50%;
-    background: #e5e7eb;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.customer-name {
-    font-weight: bold;
-    margin-bottom: 3px;
-}
-
-.customer-email {
-    font-size: 11px;
-    color: #9ca3af;
-}
-
-
-/* PAYMENT METHOD */
-
-.method {
-    display: inline-block;
-    padding: 6px 10px;
-    border-radius: 8px;
-    background: #f3f4f6;
-    font-size: 11px;
-    font-weight: 600;
-}
-
-
-/* STATUS */
-
-.status {
-    display: inline-block;
-    padding: 6px 11px;
-    border-radius: 20px;
-    font-size: 11px;
-    font-weight: bold;
-}
-
-.status.pending {
-    background: #fef3c7;
-    color: #92400e;
-}
-
-.status.verified {
-    background: #d1fae5;
-    color: #065f46;
-}
-
-.status.rejected {
-    background: #fee2e2;
-    color: #991b1b;
-}
-
-
-/* BUTTONS */
-
-.actions {
-    display: flex;
-    gap: 7px;
-    flex-wrap: wrap;
-}
-
-.btn {
-    border: none;
-    padding: 8px 11px;
-    border-radius: 7px;
-    font-size: 11px;
-    color: white;
-    cursor: pointer;
-    touch-action: manipulation;
-    -webkit-user-select: none;
-    user-select: none;
-    transition: transform 140ms var(--ease-out);
-}
-
-.btn:active:not(:disabled) {
-    transform: scale(0.97);
-}
-
-.btn-verify {
-    background: #16a34a;
-}
-
-.btn-reject {
-    background: #dc2626;
-}
-
-
-/* AMOUNT */
-
-.amount {
-    font-weight: bold;
-    font-size: 14px;
-}
-
-
-/* REFERENCE */
-
-.reference {
-    font-size: 12px;
-    color: #374151;
-}
-
-
-/* EMPTY */
-
-.empty {
-    padding: 45px;
-    text-align: center;
-    color: #6b7280;
-}
-
-
-/* MOBILE */
-
-.mobile-toggle {
-    display: none;
-    background: #111827;
-    color: white;
-    border: none;
-    border-radius: 8px;
-    padding: 9px 12px;
-    font-size: 18px;
-    touch-action: manipulation;
-    -webkit-user-select: none;
-    user-select: none;
-    transition: transform 140ms var(--ease-out);
-}
-
-.mobile-toggle:active {
-    transform: scale(0.97);
-}
-
-@media (max-width: 1250px) {
-
-    .stats-grid {
-        grid-template-columns: repeat(3, 1fr);
-    }
-}
-
-@media (max-width: 900px) {
-
-    .stats-grid {
-        grid-template-columns: repeat(2, 1fr);
+    .reference {
+        font-family: var(--mono);
+        font-size: 12.5px;
+        overflow-wrap: anywhere;
     }
 
-    .sidebar {
-        transform: translateX(-100%);
-        transition: transform 300ms var(--ease-drawer);
+    .pay-number {
+        color: var(--text-3);
+        font-variant-numeric: tabular-nums;
     }
-
-    .sidebar.show {
-        transform: translateX(0);
-    }
-
-    .main {
-        margin-left: 0;
-    }
-
-    .mobile-toggle {
-        display: block;
-    }
-
-    .topbar {
-        padding: 0 20px;
-        padding-top: env(safe-area-inset-top, 0px);
-        padding-left: max(20px, env(safe-area-inset-left, 0px));
-        padding-right: max(20px, env(safe-area-inset-right, 0px));
-    }
-
-    .content {
-        padding: 20px;
-        padding-left: max(20px, env(safe-area-inset-left, 0px));
-        padding-right: max(20px, env(safe-area-inset-right, 0px));
-        padding-bottom: max(20px, env(safe-area-inset-bottom, 0px));
-    }
-
-    .admin-info {
-        display: none;
-    }
-}
-
-@media (max-width: 600px) {
-
-    .stats-grid {
-        grid-template-columns: 1fr;
-    }
-
-    .content {
-        padding: 15px;
-        padding-left: max(15px, env(safe-area-inset-left, 0px));
-        padding-right: max(15px, env(safe-area-inset-right, 0px));
-        padding-bottom: max(15px, env(safe-area-inset-bottom, 0px));
-    }
-}
-
-
-/* REDUCED MOTION */
-
-@media (prefers-reduced-motion: reduce) {
-
-    html {
-        scroll-behavior: auto;
-    }
-
-    .menu-item:active,
-    .logout-button:active,
-    .filter-btn:active,
-    .btn:active,
-    .mobile-toggle:active {
-        transform: none !important;
-    }
-
-    *,
-    *::before,
-    *::after {
-        animation-duration: 1ms !important;
-        animation-iteration-count: 1 !important;
-    }
-}
-
-@media (prefers-reduced-motion: reduce) and (max-width: 900px) {
-
-    .sidebar {
-        opacity: 0;
-        transition: opacity 200ms ease;
-    }
-
-    .sidebar.show {
-        opacity: 1;
-    }
-}
-
 </style>
+<?php admin_shell_body(); ?>
 
-<?php $glassTheme = "admin"; require __DIR__ . "/../includes/glass.php"; ?>
-</head>
+<div class="stack">
 
-<body>
+    <!-- NUMBERS -->
 
+    <section class="stats stats-compact" aria-label="All payments">
 
-<!-- SIDEBAR -->
-
-<aside
-    class="sidebar"
-    id="sidebar"
->
-
-    <div class="sidebar-logo">
-
-        <div class="logo-icon">
-            <?= icon("home") ?>
+        <div class="stat tone-green">
+            <div class="stat-main">
+                <div class="stat-label">Verified revenue</div>
+                <div class="stat-value"><?= h(peso($verifiedAmount)) ?></div>
+                <div class="stat-note"><?= number_format($totals["verified"]) ?> verified <?= $totals["verified"] === 1 ? "payment" : "payments" ?></div>
+            </div>
+            <div class="stat-icon"><?= icon("wallet") ?></div>
         </div>
 
-        <div class="logo-text">
+        <a class="stat tone-amber" href="payment.php?status=pending">
+            <div class="stat-main">
+                <div class="stat-label">Pending</div>
+                <div class="stat-value"><?= number_format($totals["pending"]) ?></div>
+                <div class="stat-note"><?= $totals["pending"] > 0 ? h(peso($pendingAmount)) . " to check" : "Nothing to check" ?></div>
+            </div>
+            <div class="stat-icon"><?= icon("clock") ?></div>
+        </a>
 
-            <h2>
-                ARVE'S House
-            </h2>
+        <a class="stat tone-blue" href="payment.php?status=verified">
+            <div class="stat-main">
+                <div class="stat-label">Verified</div>
+                <div class="stat-value"><?= number_format($totals["verified"]) ?></div>
+                <div class="stat-note">Money received</div>
+            </div>
+            <div class="stat-icon"><?= icon("check-circle") ?></div>
+        </a>
 
-            <span>
-                Administration
-            </span>
+        <a class="stat tone-rose" href="payment.php?status=rejected">
+            <div class="stat-main">
+                <div class="stat-label">Rejected</div>
+                <div class="stat-value"><?= number_format($totals["rejected"]) ?></div>
+                <div class="stat-note">Not accepted</div>
+            </div>
+            <div class="stat-icon"><?= icon("x-circle") ?></div>
+        </a>
 
+    </section>
+
+
+    <div>
+
+        <!-- FILTERS -->
+
+        <div class="page-bar">
+            <nav class="tabs" aria-label="Status">
+                <?php foreach ($tabs as $status): ?>
+                    <a
+                        class="tab<?= $statusFilter === $status ? " is-active" : "" ?>"
+                        href="<?= h($here(["status" => $status, "page" => 1])) ?>"
+                        <?= $statusFilter === $status ? 'aria-current="page"' : "" ?>
+                    >
+                        <?= ucfirst($status) ?>
+                        <span class="tab-count"><?= number_format($tabCounts[$status]) ?></span>
+                    </a>
+                <?php endforeach; ?>
+            </nav>
+
+            <form class="filter-form" method="get" role="search">
+                <?php if ($statusFilter !== "all"): ?>
+                    <input type="hidden" name="status" value="<?= h($statusFilter) ?>">
+                <?php endif; ?>
+                <div class="filter-search">
+                    <?= icon("search") ?>
+                    <label class="sr-only" for="q">Search payments</label>
+                    <input
+                        class="input"
+                        type="search"
+                        id="q"
+                        name="q"
+                        value="<?= h($search) ?>"
+                        placeholder="Reference, guest or #reservation"
+                        autocomplete="off"
+                        enterkeyhint="search"
+                    >
+                </div>
+                <button class="btn" type="submit">Search</button>
+            </form>
         </div>
 
-    </div>
-
-
-    <div class="sidebar-menu">
-
-        <div class="menu-title">
-            Main
-        </div>
-
-        <a
-            href="dashboard.php"
-            class="menu-item"
-        >
-            <span class="menu-icon"><?= icon("chart") ?></span>
-            Dashboard
-        </a>
-
-        <a
-            href="reservations.php"
-            class="menu-item"
-        >
-            <span class="menu-icon"><?= icon("calendar") ?></span>
-            Reservations
-        </a>
-
-        <a href="calendar.php" class="menu-item">
-            <span class="menu-icon"><?= icon("calendar") ?></span>
-            Calendar
-        </a>
-
-        <a
-            href="rooms.php"
-            class="menu-item"
-        >
-            <span class="menu-icon"><?= icon("bed") ?></span>
-            Rooms
-        </a>
-
-        <a
-            href="payment.php"
-            class="menu-item active"
-        >
-            <span class="menu-icon"><?= icon("credit-card") ?></span>
-            Payments
-        </a>
-
-
-        <div class="menu-title">
-            Management
-        </div>
-
-        <a
-            href="customers.php"
-            class="menu-item"
-        >
-            <span class="menu-icon"><?= icon("users") ?></span>
-            Customers
-        </a>
-
-        <a href="messages.php" class="menu-item">
-            <span class="menu-icon"><?= icon("mail") ?></span>
-            Messages
-            <?php if ($chatUnread > 0): ?>
-                <span style="margin-left:auto;min-width:20px;height:20px;padding:0 6px;border-radius:999px;background:#dc2626;color:#fff;font-size:11px;font-weight:800;line-height:20px;text-align:center"><?= $chatUnread > 9 ? "9+" : $chatUnread ?></span>
-            <?php endif; ?>
-        </a>
-
-
-        <a
-            href="../index.php"
-            target="_blank"
-            class="menu-item"
-        >
-            <span class="menu-icon"><?= icon("globe") ?></span>
-            View Website
-        </a>
-
-    </div>
-
-
-    <div class="sidebar-footer">
-
-        <a
-            href="../logout.php"
-            class="logout-button"
-        >
-            <?= icon("log-out") ?> Logout
-        </a>
-
-    </div>
-
-</aside>
-
-
-<!-- MAIN -->
-
-<main class="main">
-
-
-<header class="topbar">
-
-    <div
-        style="
-            display:flex;
-            align-items:center;
-            gap:15px;
-        "
-    >
-
-        <button
-            class="mobile-toggle"
-            onclick="toggleSidebar()"
-        >
-            <?= icon("menu") ?>
-        </button>
-
-        <div class="topbar-left">
-
-            <h1>
-                Payments
-            </h1>
-
-            <p>
-                Review and verify customer payments
+        <?php if ($search !== ""): ?>
+            <p class="filter-note">
+                <?= number_format($tabCounts[$statusFilter]) ?>
+                <?= $tabCounts[$statusFilter] === 1 ? "payment matches" : "payments match" ?>
+                “<?= h($search) ?>”.
+                <a href="<?= h($here(["q" => "", "page" => 1])) ?>">Clear the search</a>
             </p>
-
-        </div>
-
-    </div>
-
-
-    <div class="admin-profile">
-
-        <?php if (!empty($admin["profile_image"])): ?>
-
-            <img
-                src="../<?= htmlspecialchars(
-                    $admin["profile_image"]
-                ) ?>"
-                class="admin-avatar"
-                alt="Admin"
-            >
-
-        <?php else: ?>
-
-            <div class="admin-avatar">
-                A
-            </div>
-
         <?php endif; ?>
 
 
-        <div class="admin-info">
+        <!-- TABLE -->
 
-            <strong>
-                <?= htmlspecialchars(
-                    $admin["full_name"]
-                    ?? "Administrator"
-                ) ?>
-            </strong>
+        <section class="card">
 
-            <span>
-                Administrator
-            </span>
+            <?php if ($payments): ?>
 
-        </div>
-
-    </div>
-
-</header>
-
-
-<div class="content">
-
-
-    <div class="page-header">
-
-        <h2>
-            Payment Management
-        </h2>
-
-        <p>
-            Verify, reject and monitor customer payment transactions.
-        </p>
-
-    </div>
-
-
-    <!-- STATS -->
-
-    <div class="stats-grid">
-
-
-        <div class="stat-card">
-
-            <span>
-                Total Payments
-            </span>
-
-            <h3>
-                <?= number_format($totalPayments) ?>
-            </h3>
-
-        </div>
-
-
-        <div class="stat-card">
-
-            <span>
-                Pending
-            </span>
-
-            <h3>
-                <?= number_format($pendingPayments) ?>
-            </h3>
-
-        </div>
-
-
-        <div class="stat-card">
-
-            <span>
-                Verified
-            </span>
-
-            <h3>
-                <?= number_format($verifiedPayments) ?>
-            </h3>
-
-        </div>
-
-
-        <div class="stat-card">
-
-            <span>
-                Rejected
-            </span>
-
-            <h3>
-                <?= number_format($rejectedPayments) ?>
-            </h3>
-
-        </div>
-
-
-        <div class="stat-card revenue-card">
-
-            <span>
-                Verified Revenue
-            </span>
-
-            <h3>
-                ₱<?= number_format(
-                    $totalVerifiedAmount,
-                    2
-                ) ?>
-            </h3>
-
-        </div>
-
-
-    </div>
-
-
-    <!-- FILTERS -->
-
-    <div class="filters">
-
-        <?php foreach ($allowedFilters as $filter): ?>
-
-            <a
-                href="?status=<?= urlencode($filter) ?>"
-                class="filter-btn
-                <?= $statusFilter === $filter
-                    ? "active"
-                    : ""
-                ?>"
-            >
-
-                <?= ucfirst($filter) ?>
-
-            </a>
-
-        <?php endforeach; ?>
-
-    </div>
-
-
-    <!-- PAYMENT TABLE -->
-
-    <div class="table-card">
-
-
-        <div class="table-header">
-
-            <h3>
-                Payment Transactions
-            </h3>
-
-        </div>
-
-
-        <?php if (count($payments) > 0): ?>
-
-
-            <div class="table-wrapper">
-
-
-                <table>
-
-
-                    <thead>
-
-                        <tr>
-
-                            <th>ID</th>
-
-                            <th>Customer</th>
-
-                            <th>Reservation</th>
-
-                            <th>Room</th>
-
-                            <th>Method</th>
-
-                            <th>Amount</th>
-
-                            <th>Reference</th>
-
-                            <th>Status</th>
-
-                            <th>Date</th>
-
-                            <th>Action</th>
-
-                        </tr>
-
-                    </thead>
-
-
-                    <tbody>
-
-
-                        <?php foreach ($payments as $payment): ?>
-
-
+                <div class="table-wrap">
+                    <table class="table table-stack">
+                        <thead>
                             <tr>
-
-
-                                <td>
-                                    #<?= (int) $payment["id"] ?>
-                                </td>
-
-
-                                <td>
-
-                                    <div class="customer-info">
-
-
-                                        <?php if (
-                                            !empty(
-                                                $payment["profile_image"]
-                                            )
-                                        ): ?>
-
-                                            <img
-                                                src="../<?= htmlspecialchars(
-                                                    $payment[
-                                                        "profile_image"
-                                                    ]
-                                                ) ?>"
-                                                class="customer-image"
-                                                alt="Customer"
-                                            >
-
-                                        <?php else: ?>
-
-                                            <div
-                                                class="customer-placeholder"
-                                            >
-                                                <?= icon("user") ?>
-                                            </div>
-
-                                        <?php endif; ?>
-
-
-                                        <div>
-
-                                            <div class="customer-name">
-
-                                                <?= htmlspecialchars(
-                                                    $payment[
-                                                        "customer_name"
-                                                    ]
-                                                    ?? "Customer"
-                                                ) ?>
-
-                                            </div>
-
-                                            <div class="customer-email">
-
-                                                <?= htmlspecialchars(
-                                                    $payment[
-                                                        "customer_email"
-                                                    ]
-                                                    ?? ""
-                                                ) ?>
-
-                                            </div>
-
-                                        </div>
-
-                                    </div>
-
-                                </td>
-
-
-                                <td>
-
-                                    #<?= (int)
-                                        $payment[
-                                            "reservation_number"
-                                        ]
-                                    ?>
-
-                                </td>
-
-
-                                <td>
-
-                                    <?= htmlspecialchars(
-                                        $payment["room_name"]
-                                    ) ?>
-
-                                </td>
-
-
-                                <td>
-
-                                    <span class="method">
-
-                                        <?= strtoupper(
-                                            str_replace(
-                                                "_",
-                                                " ",
-                                                htmlspecialchars(
-                                                    $payment[
-                                                        "payment_method"
-                                                    ]
-                                                )
-                                            )
-                                        ) ?>
-
-                                    </span>
-
-                                </td>
-
-
-                                <td class="amount">
-
-                                    ₱<?= number_format(
-                                        (float)
-                                        $payment["amount"],
-                                        2
-                                    ) ?>
-
-                                </td>
-
-
-                                <td class="reference">
-
-                                    <?= !empty(
-                                        $payment["reference_number"]
-                                    )
-                                        ? htmlspecialchars(
-                                            $payment[
-                                                "reference_number"
-                                            ]
-                                        )
-                                        : "—"
-                                    ?>
-
-                                </td>
-
-
-                                <td>
-
-                                    <span
-                                        class="status <?= htmlspecialchars(
-                                            $payment["status"]
-                                        ) ?>"
-                                    >
-
-                                        <?= ucfirst(
-                                            htmlspecialchars(
-                                                $payment["status"]
-                                            )
-                                        ) ?>
-
-                                    </span>
-
-                                </td>
-
-
-                                <td>
-
-                                    <?= htmlspecialchars(
-                                        $payment["created_at"]
-                                    ) ?>
-
-                                </td>
-
-
-                                <td>
-
-
-                                    <?php if (
-                                        $payment["status"]
-                                        === "pending"
-                                    ): ?>
-
-
-                                        <div class="actions">
-
-
-                                            <form method="POST">
-
-                                                <input
-                                                    type="hidden"
-                                                    name="payment_id"
-                                                    value="<?= (int)
-                                                        $payment["id"]
-                                                    ?>"
-                                                >
-
-                                                <input
-                                                    type="hidden"
-                                                    name="action"
-                                                    value="verify"
-                                                >
-
-                                                <button
-                                                    type="submit"
-                                                    class="btn btn-verify"
-                                                >
-                                                    Verify
-                                                </button>
-
-                                            </form>
-
-
-                                            <form
-                                                method="POST"
-                                                onsubmit="
-                                                    return confirm(
-                                                        'Reject this payment?'
-                                                    );
-                                                "
-                                            >
-
-                                                <input
-                                                    type="hidden"
-                                                    name="payment_id"
-                                                    value="<?= (int)
-                                                        $payment["id"]
-                                                    ?>"
-                                                >
-
-                                                <input
-                                                    type="hidden"
-                                                    name="action"
-                                                    value="reject"
-                                                >
-
-                                                <button
-                                                    type="submit"
-                                                    class="btn btn-reject"
-                                                >
-                                                    Reject
-                                                </button>
-
-                                            </form>
-
-
-                                        </div>
-
-
-                                    <?php else: ?>
-
-
-                                        —
-
-
-                                    <?php endif; ?>
-
-
-                                </td>
-
-
+                                <th>Guest</th>
+                                <th>Reservation</th>
+                                <th>Method</th>
+                                <th>Reference</th>
+                                <th class="right">Amount</th>
+                                <th>Status</th>
+                                <th class="hide-narrow">Date</th>
+                                <th class="right">Action</th>
                             </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($payments as $payment): ?>
+                                <?php
+                                $id = (int) $payment["id"];
+                                $reservationId = (int) $payment["reservation_id"];
+                                $online = str_starts_with((string) $payment["payment_method"], "online");
+                                $reference = trim((string) $payment["reference_number"]);
+                                ?>
+                                <tr>
+                                    <td class="cell-lead">
+                                        <div class="person">
+                                            <?= admin_avatar(["full_name" => $payment["customer_name"], "profile_image" => $payment["profile_image"]], 34) ?>
+                                            <div class="person-text">
+                                                <span class="person-name"><?= h($payment["customer_name"]) ?></span>
+                                                <span class="person-sub"><?= h($payment["customer_email"]) ?></span>
+                                            </div>
+                                        </div>
+                                    </td>
 
+                                    <td data-label="Reservation">
+                                        <?php if (admin_can("reservations")): ?>
+                                            <a class="cell-main" href="reservations.php?q=<?= $reservationId ?>">#<?= $reservationId ?></a>
+                                        <?php else: ?>
+                                            <span class="cell-main">#<?= $reservationId ?></span>
+                                        <?php endif; ?>
+                                        · <?= h($payment["room_name"]) ?>
+                                        <span class="cell-sub nowrap"><?= h(admin_stay($payment["check_in"], $payment["check_out"])) ?></span>
+                                    </td>
 
-                        <?php endforeach; ?>
+                                    <td data-label="Method"><?= h(payment_method_label((string) $payment["payment_method"])) ?></td>
 
+                                    <td data-label="Reference" class="reference"><?= $reference !== "" ? h($reference) : '<span class="muted">None</span>' ?></td>
 
-                    </tbody>
+                                    <td data-label="Amount" class="right num strong"><?= h(peso($payment["amount"], 2)) ?></td>
 
+                                    <td data-label="Status"><?= status_pill($payment["status"]) ?></td>
 
-                </table>
+                                    <td data-label="Date" class="nowrap soft hide-narrow">
+                                        <?= h(admin_date($payment["created_at"])) ?>
+                                        <span class="cell-sub"><?= h(admin_date($payment["created_at"], "g:i A")) ?></span>
+                                    </td>
 
+                                    <td class="cell-wide">
+                                        <div class="table-actions">
 
-            </div>
+                                            <button class="btn btn-sm btn-ghost" type="button" data-dialog-open="payment-<?= $id ?>">Details</button>
 
+                                            <?php if ($payment["status"] === "pending"): ?>
 
-        <?php else: ?>
+                                                <form class="inline-form" method="post" action="<?= h($here()) ?>"
+                                                    data-confirm="<?= $online
+                                                        ? "PayMongo has not confirmed this online payment yet. Verify it only if you can see the " . h(peso($payment["amount"], 2)) . " in your PayMongo account. Reservation #" . $reservationId . " will be confirmed."
+                                                        : "Verify " . h($payment["customer_name"]) . "'s payment of " . h(peso($payment["amount"], 2)) . "? Reservation #" . $reservationId . " will be confirmed." ?>"
+                                                    data-confirm-title="Verify this payment?"
+                                                    data-confirm-ok="Verify"
+                                                >
+                                                    <?= csrf_field() ?>
+                                                    <input type="hidden" name="payment_id" value="<?= $id ?>">
+                                                    <input type="hidden" name="action" value="verify">
+                                                    <button class="btn btn-sm btn-success" type="submit">Verify</button>
+                                                </form>
 
+                                                <form class="inline-form" method="post" action="<?= h($here()) ?>"
+                                                    data-confirm="Reject <?= h($payment["customer_name"]) ?>'s payment of <?= h(peso($payment["amount"], 2)) ?>? The guest will have to send a new payment. This cannot be undone."
+                                                    data-confirm-title="Reject this payment?"
+                                                    data-confirm-ok="Reject"
+                                                    data-confirm-tone="danger"
+                                                >
+                                                    <?= csrf_field() ?>
+                                                    <input type="hidden" name="payment_id" value="<?= $id ?>">
+                                                    <input type="hidden" name="action" value="reject">
+                                                    <button class="btn btn-sm btn-danger-soft" type="submit">Reject</button>
+                                                </form>
 
-            <div class="empty">
+                                            <?php endif; ?>
 
-                <h3>
-                    No payments found
-                </h3>
+                                        </div>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
 
-                <p>
-                    Customer payments will appear here.
-                </p>
+                <?= admin_pager($paging, fn (int $page) => $here(["page" => $page]), "payments") ?>
 
-            </div>
+            <?php else: ?>
 
+                <div class="empty">
+                    <div class="empty-icon"><?= icon("credit-card", 22) ?></div>
+                    <h3>No payments found</h3>
+                    <p>
+                        <?= $search !== "" || $statusFilter !== "all"
+                            ? "Nothing matches what you picked."
+                            : "Payments show up here as soon as a guest sends one." ?>
+                    </p>
+                    <?php if ($search !== "" || $statusFilter !== "all"): ?>
+                        <a class="btn" href="payment.php">Show all payments</a>
+                    <?php endif; ?>
+                </div>
 
-        <?php endif; ?>
+            <?php endif; ?>
 
+        </section>
 
     </div>
-
 
 </div>
 
-</main>
 
+<!-- DETAILS, ONE WINDOW PER ROW -->
 
-<script>
+<?php foreach ($payments as $payment): ?>
+    <?php
+    $id = (int) $payment["id"];
+    $reservationId = (int) $payment["reservation_id"];
+    $reference = trim((string) $payment["reference_number"]);
+    ?>
+    <dialog class="dialog dialog-wide" id="payment-<?= $id ?>" aria-labelledby="payment-<?= $id ?>-title">
+        <div class="dialog-head">
+            <h2 id="payment-<?= $id ?>-title" tabindex="-1" autofocus>Payment #<?= $id ?></h2>
+            <button class="btn btn-ghost btn-icon" type="button" data-dialog-close aria-label="Close"><?= icon("x") ?></button>
+        </div>
 
-function toggleSidebar() {
+        <div class="dialog-body">
+            <div class="person" style="margin-bottom:14px">
+                <?= admin_avatar(["full_name" => $payment["customer_name"], "profile_image" => $payment["profile_image"]], 44) ?>
+                <div class="person-text">
+                    <span class="person-name" style="max-width:none"><?= h($payment["customer_name"]) ?></span>
+                    <span class="person-sub" style="max-width:none">
+                        <?= h($payment["customer_email"]) ?><?= trim((string) $payment["customer_phone"]) !== "" ? " · " . h($payment["customer_phone"]) : "" ?>
+                    </span>
+                </div>
+            </div>
 
-    document
-        .getElementById("sidebar")
-        .classList
-        .toggle("show");
+            <dl class="kv">
+                <dt>Status</dt>
+                <dd><?= status_pill($payment["status"]) ?></dd>
 
-}
+                <dt>Amount</dt>
+                <dd class="strong"><?= h(peso($payment["amount"], 2)) ?></dd>
 
-</script>
+                <dt>Method</dt>
+                <dd><?= h(payment_method_label((string) $payment["payment_method"])) ?></dd>
 
+                <dt>Reference</dt>
+                <dd class="reference">
+                    <?php if ($reference !== ""): ?>
+                        <?= h($reference) ?>
+                        <button class="btn btn-ghost btn-sm" type="button" data-copy="<?= h($reference) ?>">Copy</button>
+                    <?php else: ?>
+                        None given
+                    <?php endif; ?>
+                </dd>
 
-</body>
-</html>
+                <dt>Sent on</dt>
+                <dd><?= h(admin_date($payment["created_at"], "M j, Y · g:i A")) ?></dd>
+
+                <dt>Reservation</dt>
+                <dd>#<?= $reservationId ?> · <?= h($payment["room_name"]) ?> <?= status_pill($payment["reservation_status"]) ?></dd>
+
+                <dt>Stay</dt>
+                <dd><?= h(admin_stay($payment["check_in"], $payment["check_out"])) ?></dd>
+            </dl>
+        </div>
+
+        <div class="dialog-actions">
+            <?php if (admin_can("messages")): ?>
+                <a class="btn" href="messages.php?customer=<?= (int) $payment["user_id"] ?>"><?= icon("message") ?> Message guest</a>
+            <?php endif; ?>
+            <?php if (admin_can("reservations")): ?>
+                <a class="btn" href="reservations.php?q=<?= $reservationId ?>"><?= icon("calendar") ?> Open reservation</a>
+            <?php endif; ?>
+            <button class="btn btn-primary" type="button" data-dialog-close>Close</button>
+        </div>
+    </dialog>
+<?php endforeach; ?>
+
+<?php admin_shell_end(); ?>
