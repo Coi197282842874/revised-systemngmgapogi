@@ -222,8 +222,10 @@ customer_shell_head([
                 </p>
 
                 <div class="next-stay-actions">
-                    <?php if (customer_can_pay($nextStay)): ?>
-                        <a class="btn btn-primary" href="../payment.php?reservation_id=<?= $id ?>"><?= icon("credit-card") ?> <?= $nextStay["payment_status"] === "rejected" ? "Pay again" : "Pay now" ?></a>
+                    <?php if (ticket_available($nextStay)): ?>
+                        <a class="btn btn-primary" href="ticket.php?id=<?= $id ?>"><?= icon("ticket") ?> View ticket</a>
+                    <?php elseif (customer_can_pay($nextStay)): ?>
+                        <a class="btn btn-primary" href="pay.php?reservation_id=<?= $id ?>"><?= icon("credit-card") ?> <?= $nextStay["payment_status"] === "rejected" ? "Pay again" : "Pay now" ?></a>
                     <?php elseif ($nextStay["payment_status"] === "pending"): ?>
                         <span class="wait-note"><?= icon("clock", 14) ?> We are checking your payment</span>
                     <?php endif; ?>
@@ -323,8 +325,10 @@ customer_shell_head([
                                         <td><?= customer_payment_pill($reservation["payment_status"]) ?></td>
                                         <td><?= status_pill($reservation["status"]) ?></td>
                                         <td class="right">
-                                            <?php if (customer_can_pay($reservation)): ?>
-                                                <a class="btn btn-sm btn-primary" href="../payment.php?reservation_id=<?= $id ?>"><?= $reservation["payment_status"] === "rejected" ? "Pay again" : "Pay now" ?></a>
+                                            <?php if (ticket_available($reservation)): ?>
+                                                <a class="btn btn-sm btn-primary" href="ticket.php?id=<?= $id ?>"><?= icon("ticket") ?> Ticket</a>
+                                            <?php elseif (customer_can_pay($reservation)): ?>
+                                                <a class="btn btn-sm btn-primary" href="pay.php?reservation_id=<?= $id ?>"><?= $reservation["payment_status"] === "rejected" ? "Pay again" : "Pay now" ?></a>
                                             <?php else: ?>
                                                 <a class="btn btn-sm btn-ghost" href="reservations.php?open=<?= $id ?>">Details</a>
                                             <?php endif; ?>

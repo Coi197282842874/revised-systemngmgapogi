@@ -358,6 +358,7 @@ function activity_tone(string $type): string
         "dates.opened" => "green",
         "room.deleted" => "rose",
         "backup.downloaded" => "cyan",
+        "ticket.scanned" => "green",
     ];
 
     if (isset($exact[$type])) {

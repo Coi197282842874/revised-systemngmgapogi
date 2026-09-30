@@ -345,8 +345,10 @@ customer_shell_head([
                                         <div class="table-actions">
                                             <button class="btn btn-sm btn-ghost" type="button" data-dialog-open="reservation-<?= $id ?>">Details</button>
 
-                                            <?php if (customer_can_pay($reservation)): ?>
-                                                <a class="btn btn-sm btn-primary" href="../payment.php?reservation_id=<?= $id ?>"><?= $reservation["payment_status"] === "rejected" ? "Pay again" : "Pay now" ?></a>
+                                            <?php if (ticket_available($reservation)): ?>
+                                                <a class="btn btn-sm btn-primary" href="ticket.php?id=<?= $id ?>"><?= icon("ticket") ?> Ticket</a>
+                                            <?php elseif (customer_can_pay($reservation)): ?>
+                                                <a class="btn btn-sm btn-primary" href="pay.php?reservation_id=<?= $id ?>"><?= $reservation["payment_status"] === "rejected" ? "Pay again" : "Pay now" ?></a>
                                             <?php elseif ($reservation["payment_status"] === "pending" && $reservation["status"] === "pending"): ?>
                                                 <span class="wait-note"><?= icon("clock", 14) ?> Being checked</span>
                                             <?php endif; ?>
@@ -449,8 +451,10 @@ customer_shell_head([
 
             <a class="btn" href="messages.php?about=<?= $id ?>"><?= icon("message") ?> Ask about it</a>
 
-            <?php if (customer_can_pay($reservation)): ?>
-                <a class="btn btn-primary" href="../payment.php?reservation_id=<?= $id ?>"><?= icon("credit-card") ?> <?= $reservation["payment_status"] === "rejected" ? "Pay again" : "Pay now" ?></a>
+            <?php if (ticket_available($reservation)): ?>
+                <a class="btn btn-primary" href="ticket.php?id=<?= $id ?>"><?= icon("ticket") ?> View ticket</a>
+            <?php elseif (customer_can_pay($reservation)): ?>
+                <a class="btn btn-primary" href="pay.php?reservation_id=<?= $id ?>"><?= icon("credit-card") ?> <?= $reservation["payment_status"] === "rejected" ? "Pay again" : "Pay now" ?></a>
             <?php else: ?>
                 <button class="btn btn-primary" type="button" data-dialog-close>Done</button>
             <?php endif; ?>

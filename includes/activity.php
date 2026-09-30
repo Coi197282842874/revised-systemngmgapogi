@@ -26,7 +26,7 @@
  *   admin.login   admin.created   admin.role_changed   admin.permissions_changed
  *   admin.activated   admin.deactivated   admin.password_changed
  *   room.created  room.updated  room.deleted   dates.closed   dates.opened
- *   settings.updated   backup.downloaded
+ *   settings.updated   backup.downloaded   ticket.scanned
  */
 
 require_once __DIR__ . "/auth.php";
@@ -253,6 +253,7 @@ function activity_icon(string $type): string
         "dates.opened" => "calendar",
         "settings.updated" => "settings",
         "backup.downloaded" => "download",
+        "ticket.scanned" => "scan",
     ];
 
     if (isset($exact[$type])) {

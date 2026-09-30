@@ -1990,7 +1990,7 @@ function roomImages(int $roomId): array
                     (int) $room["id"];
 
                 $bookingUrl =
-                    "reservation.php?room_id=" .
+                    "customer/book.php?room_id=" .
                     $roomId;
 
                 if ($availabilityChecked) {

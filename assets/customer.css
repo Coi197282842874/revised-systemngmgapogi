@@ -7,10 +7,11 @@
  * gold. Only the tokens change, plus the few parts that only guests have.
  *
  * Contents
- *    1 Tokens (light, dark)      5 Rounded rows (phones)
- *    2 The frame                 6 Messages
- *    3 Updates in the top bar    7 Profile
- *    4 Dashboard: the next stay  8 Less motion
+ *    1 Tokens (light, dark)      6 Messages
+ *    2 The frame                 7 Profile
+ *    3 Updates in the top bar    8 Booking and payment
+ *    4 Dashboard: the next stay  9 The ticket, and printing it
+ *    5 Rounded rows (phones)     10 Less motion
  */
 
 
@@ -196,6 +197,25 @@
 /* the terms open from the account menu here: their round button would sit on the bottom bar */
 [data-area="customer"] .tm-fab {
     display: none !important;
+}
+
+/* a note in the site's own colors */
+.alert-info {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+}
+
+/* a group of choices without the browser's frame */
+.method-set {
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+
+.method-set legend {
+    margin-bottom: 8px;
+    padding: 0;
 }
 
 /* "Being checked": a quiet line where a button would be */
@@ -750,12 +770,651 @@
 
 
 /* ======================================================
-   8 LESS MOTION
+   8 BOOKING AND PAYMENT
+====================================================== */
+
+/* the room being booked or paid for */
+.stay-card {
+    overflow: hidden;
+}
+
+.stay-photo {
+    position: relative;
+    aspect-ratio: 16 / 10;
+    background: var(--brand-mark);
+}
+
+.stay-photo img,
+.stay-photo .scene {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.stay-body {
+    display: grid;
+    gap: 8px;
+    padding: 20px;
+}
+
+.stay-body h2 {
+    margin: 0;
+    font-family: var(--serif);
+    font-size: 24px;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+}
+
+.stay-body > p {
+    margin: 0;
+    color: var(--text-2);
+    font-size: 13.5px;
+    overflow-wrap: anywhere;
+}
+
+.stay-facts {
+    margin: 6px 0 0;
+    padding: 0;
+    border-top: 1px solid var(--line);
+    list-style: none;
+}
+
+.stay-facts li {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 13.5px;
+}
+
+.stay-facts li:last-child {
+    border-bottom: 0;
+}
+
+.stay-facts span {
+    color: var(--text-3);
+}
+
+.stay-facts strong {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.stay-due {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 4px;
+    padding: 14px 16px;
+    border-radius: var(--radius);
+    background: var(--accent-soft);
+}
+
+.stay-due span {
+    color: var(--text-2);
+    font-weight: 600;
+}
+
+.stay-due strong {
+    color: var(--accent-text);
+    font-size: 22px;
+    font-variant-numeric: tabular-nums;
+}
+
+/* the price while dates are picked */
+.price-card {
+    display: grid;
+    gap: 8px;
+    padding: 14px 16px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+}
+
+.price-row,
+.price-total {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.price-row {
+    color: var(--text-2);
+    font-size: 13.5px;
+}
+
+.price-row strong {
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+
+.price-total {
+    padding-top: 10px;
+    border-top: 1px solid var(--line);
+    font-weight: 700;
+}
+
+.price-total strong {
+    color: var(--accent-text);
+    font-size: 22px;
+    font-variant-numeric: tabular-nums;
+}
+
+/* "I agree to the terms" */
+.check-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    color: var(--text-2);
+    font-size: 13.5px;
+    line-height: 1.5;
+    cursor: pointer;
+}
+
+.check-row a {
+    color: var(--accent-text);
+    font-weight: 700;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.check-row input {
+    flex: none;
+    width: 18px;
+    height: 18px;
+    margin: 2px 0 0;
+    accent-color: var(--accent);
+}
+
+/* payment methods: a choice of cards */
+.method-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 10px;
+}
+
+.method-option {
+    position: relative;
+    display: block;
+    cursor: pointer;
+}
+
+.method-option input {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+}
+
+.method-tile {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 100%;
+    padding: 14px;
+    border: 1.5px solid var(--line-2);
+    border-radius: var(--radius);
+    background: var(--surface);
+    transition: border-color 150ms ease, background-color 150ms ease;
+}
+
+.method-option input:checked + .method-tile {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.method-option input:focus-visible + .method-tile {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+}
+
+.method-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.method-text strong {
+    display: block;
+    font-size: 14px;
+}
+
+.method-text small {
+    display: block;
+    color: var(--text-3);
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+.method-check {
+    flex: none;
+    color: var(--accent-text);
+    font-size: 18px;
+    opacity: 0;
+    transition: opacity 150ms ease;
+}
+
+.method-option input:checked + .method-tile .method-check {
+    opacity: 1;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .method-option:hover .method-tile {
+        border-color: var(--accent);
+    }
+}
+
+/* "Booking received" */
+.done-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 30px 22px 26px;
+    text-align: center;
+}
+
+.done-icon {
+    display: grid;
+    place-items: center;
+    width: 64px;
+    height: 64px;
+    margin-bottom: 6px;
+    border-radius: 50%;
+    background: var(--success-soft);
+    color: var(--success);
+    font-size: 30px;
+}
+
+.done-card h2 {
+    margin: 0;
+    font-family: var(--serif);
+    font-size: 28px;
+}
+
+.done-card > p {
+    max-width: 520px;
+    margin: 0;
+    color: var(--text-2);
+}
+
+.done-number {
+    margin-top: 6px;
+    padding: 6px 14px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+}
+
+/* the availability calendar (includes/availability-calendar.php) in the frame's colors */
+[data-area="customer"] .ac {
+    --ac-brown: var(--accent);
+    --ac-brown-dark: var(--accent-text);
+    --ac-ink: var(--text);
+    --ac-muted: var(--text-3);
+    --ac-line: var(--line-2);
+    border: 1px solid var(--line);
+    background: var(--surface-2);
+    box-shadow: none;
+}
+
+[data-area="customer"] .ac-nav {
+    background: var(--surface);
+}
+
+[data-area="customer"] .ac-day.free,
+[data-area="customer"] .ac-day.checkout-only,
+[data-area="customer"] .ac-dot.free {
+    background: var(--surface);
+}
+
+[data-area="customer"] .ac-day.taken {
+    background: repeating-linear-gradient(135deg, var(--surface-3) 0 4px, var(--surface-2) 4px 8px);
+    color: var(--text-3);
+}
+
+[data-area="customer"] .ac-dot.taken {
+    background: repeating-linear-gradient(135deg, var(--surface-3) 0 3px, var(--line-2) 3px 6px);
+}
+
+[data-area="customer"] .ac-day.past {
+    color: var(--text-3);
+    opacity: 0.5;
+}
+
+[data-area="customer"] .ac-day.in-range {
+    background: var(--accent-soft);
+}
+
+[data-area="customer"] .ac-day.start,
+[data-area="customer"] .ac-day.end,
+[data-area="customer"] .ac-dot.picked {
+    background: var(--accent);
+    color: var(--on-accent);
+}
+
+[data-area="customer"] .ac-hint.ac-hint-error {
+    color: var(--danger);
+}
+
+@media (hover: hover) and (pointer: fine) {
+    [data-area="customer"] .ac-day:is(.free, .checkout-only):not(.start):not(.end):not(.in-range):hover {
+        background: var(--accent-soft);
+    }
+}
+
+
+/* ======================================================
+   9 THE TICKET, AND PRINTING IT
+====================================================== */
+
+.ticket-page {
+    display: grid;
+    justify-items: center;
+    gap: 14px;
+}
+
+.ticket {
+    width: min(100%, 420px);
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 26px;
+    background: var(--surface);
+    box-shadow: var(--shadow-card);
+}
+
+.ticket-top {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 26px 24px 18px;
+    text-align: center;
+}
+
+.ticket-brand {
+    width: 44px;
+    height: 44px;
+    margin-bottom: 10px;
+    border-radius: 13px;
+    font-size: 20px;
+}
+
+.ticket-check {
+    display: grid;
+    color: var(--accent-text);
+    font-size: 36px;
+}
+
+.ticket-top h2 {
+    margin: 4px 0 0;
+    font-family: var(--serif);
+    font-size: 28px;
+    line-height: 1.15;
+}
+
+.ticket-state {
+    margin: 0;
+    color: var(--accent-text);
+    font-weight: 700;
+}
+
+.ticket-code {
+    margin: 12px 0 6px;
+    padding: 8px 16px;
+    border-radius: 12px;
+    background: var(--surface-2);
+    color: var(--text-2);
+    font-size: 13px;
+}
+
+.ticket-code strong {
+    color: var(--text);
+    letter-spacing: 0.04em;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+/* always white behind the code, so a camera reads it in the dark theme too */
+.ticket-qr {
+    display: grid;
+    place-items: center;
+    width: min(100%, 236px);
+    aspect-ratio: 1;
+    margin-top: 6px;
+    overflow: hidden;
+    border-radius: 18px;
+    background: #fff;
+    box-shadow: 0 10px 26px rgba(20, 13, 10, 0.14), 0 0 0 1px rgba(20, 13, 10, 0.06);
+}
+
+.ticket-qr svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+.ticket-qr-wait {
+    color: #c8bdb3;
+    font-size: 48px;
+}
+
+.ticket-hint {
+    margin: 10px 0 0;
+    color: var(--text-3);
+    font-size: 12.5px;
+}
+
+/* the line where a paper ticket would tear, with a bite out of each side */
+.ticket-tear {
+    position: relative;
+    margin: 6px 0;
+    border-top: 2px dashed var(--line-2);
+}
+
+.ticket-tear::before,
+.ticket-tear::after {
+    content: "";
+    position: absolute;
+    top: -13px;
+    width: 24px;
+    height: 24px;
+    border: 1px solid var(--line);
+    border-radius: 50%;
+    background: var(--bg);
+}
+
+.ticket-tear::before {
+    left: -13px;
+}
+
+.ticket-tear::after {
+    right: -13px;
+}
+
+.ticket-stay,
+.ticket-people {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr) minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    padding: 18px 24px;
+}
+
+.ticket-people {
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.7fr) minmax(0, 1fr);
+    border-top: 1px solid var(--line);
+    background: var(--surface-2);
+}
+
+.ticket-stay span,
+.ticket-people span {
+    display: block;
+    color: var(--text-3);
+    font-size: 11.5px;
+    font-weight: 600;
+}
+
+.ticket-stay strong {
+    display: block;
+    font-size: 16px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.ticket-stay small {
+    color: var(--text-3);
+    font-size: 12px;
+}
+
+.ticket-people strong {
+    display: block;
+    font-size: 14px;
+    overflow-wrap: anywhere;
+}
+
+.ticket-mid {
+    min-width: 0;
+    text-align: center;
+}
+
+.ticket-mid span {
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 700;
+    overflow-wrap: anywhere;
+}
+
+.ticket-mid em {
+    display: block;
+    color: var(--accent-text);
+    font-size: 12px;
+    font-style: normal;
+    font-weight: 700;
+}
+
+.ticket-arrow {
+    position: relative;
+    display: block;
+    width: 64px;
+    height: 2px;
+    margin: 8px auto 0;
+    background: var(--line-2);
+}
+
+.ticket-arrow::after {
+    content: "";
+    position: absolute;
+    top: -4px;
+    right: 0;
+    padding: 3.5px;
+    border: solid var(--line-2);
+    border-width: 0 2px 2px 0;
+    transform: rotate(-45deg);
+}
+
+.ticket-end {
+    text-align: right;
+}
+
+.ticket-actions {
+    display: flex;
+    gap: 10px;
+    width: min(100%, 420px);
+}
+
+.ticket-actions .btn-primary {
+    flex: 1;
+    min-height: 48px;
+}
+
+.ticket-actions .btn-icon {
+    min-width: 48px;
+    min-height: 48px;
+}
+
+.ticket-note {
+    width: min(100%, 420px);
+    text-align: center;
+}
+
+@media (max-width: 380px) {
+    .ticket-stay,
+    .ticket-people {
+        padding: 16px 18px;
+    }
+
+    .ticket-stay strong {
+        font-size: 14px;
+    }
+}
+
+/* printed (or saved as PDF): light, and only the ticket */
+@media print {
+    :root[data-area="customer"],
+    :root[data-area="customer"][data-theme="dark"] {
+        color-scheme: light;
+        --bg: #fff;
+        --bg-2: #fff;
+        --surface: #fff;
+        --surface-2: #faf6f1;
+        --surface-3: #f1e5d7;
+        --line: #e2d6c8;
+        --line-2: #cdbba7;
+        --text: #241a15;
+        --text-2: #4a3d35;
+        --text-3: #6b5d54;
+        --accent: #7a4f36;
+        --accent-text: #7a4f36;
+        --accent-soft: #f4e7d9;
+        --on-accent: #fff;
+        --shadow-card: none;
+        --brand-mark: linear-gradient(145deg, #8a5e42, #5a3826);
+    }
+
+    body:has(.ticket-page) .topbar,
+    body:has(.ticket-page) .page-title-mobile,
+    body:has(.ticket-page) .alert,
+    .ticket-actions,
+    .ticket-note {
+        display: none !important;
+    }
+
+    .ticket-page {
+        padding-top: 8mm;
+    }
+
+    .ticket {
+        break-inside: avoid;
+        box-shadow: none;
+    }
+
+    .ticket-qr {
+        box-shadow: 0 0 0 1px #ddd;
+    }
+}
+
+
+/* ======================================================
+   10 LESS MOTION
 ====================================================== */
 
 @media (prefers-reduced-motion: reduce) {
     .recent-item {
         transform: none !important;
+    }
+
+    .method-tile,
+    .method-check {
+        transition: none;
     }
 
     .profile-photo-btn {

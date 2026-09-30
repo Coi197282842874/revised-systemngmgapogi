@@ -37,5 +37,5 @@ $outcome = [
     "cancelled" => "cancelled",
 ][$result] ?? "processing";
 
-header("Location: payment.php?reservation_id=" . (int) $payment["reservation_id"] . "&online=" . $outcome);
+header("Location: customer/pay.php?reservation_id=" . (int) $payment["reservation_id"] . "&online=" . $outcome);
 exit;

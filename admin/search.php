@@ -36,6 +36,7 @@ $pages = [];
 // words people type that are not in a page's name
 $alsoKnownAs = [
     "reservations" => "bookings booking reserve pending confirmed",
+    "scan" => "scan ticket qr code check-in check in arrival guest camera",
     "calendar" => "dates close block schedule availability",
     "rooms" => "room price capacity photos",
     "payments" => "payment gcash cash verify paymongo money",

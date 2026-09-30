@@ -204,6 +204,11 @@ img, svg {
     max-width: 100%;
 }
 
+/* hidden means hidden, whatever display a class gives (buttons, pictures) */
+[hidden] {
+    display: none !important;
+}
+
 a {
     color: var(--accent-text);
     text-decoration: none;

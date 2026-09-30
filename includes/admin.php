@@ -37,7 +37,7 @@ const ADMIN_ROLES = [
 ];
 
 const ADMIN_PERMISSIONS = [
-    "reservations" => ["label" => "Reservations", "about" => "See bookings, decline or complete them"],
+    "reservations" => ["label" => "Reservations", "about" => "See bookings, decline or complete them, scan tickets"],
     "calendar" => ["label" => "Calendar", "about" => "See the calendar, close and open dates"],
     "rooms" => ["label" => "Rooms", "about" => "Add, edit and remove rooms"],
     "payments" => ["label" => "Payments", "about" => "Verify or reject payments"],
@@ -614,6 +614,7 @@ function admin_menu(PDO $pdo): array
         ],
         "Bookings" => [
             ["reservations", "Reservations", "clipboard", "reservations.php", "reservations", $counts["pending_reservations"]],
+            ["scan", "Scan Ticket", "scan", "scan.php", "reservations", 0],
             ["calendar", "Calendar", "calendar", "calendar.php", "calendar", 0],
             ["rooms", "Rooms", "bed", "rooms.php", "rooms", 0],
             ["payments", "Payments", "credit-card", "payment.php", "payments", $counts["payments_to_verify"]],

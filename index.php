@@ -393,7 +393,7 @@ $heroIcon = in_array(trim($siteSettings["hero_card_icon"]), ["🏡", "🏠", "�
             <div class="grid gap-5 md:grid-cols-2">
                 <?php foreach ($rooms as $index => $room): ?>
                     <?php
-                    $bookingUrl = "reservation.php?room_id=" . (int) $room["id"];
+                    $bookingUrl = "customer/book.php?room_id=" . (int) $room["id"];
                     $photo = $roomPhotos[(int) $room["id"]][1] ?? "";
                     $guests = (int) $room["capacity"];
                     $description = trim((string) ($room["description"] ?? "")) ?: "Comfortable room available for your stay.";

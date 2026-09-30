@@ -14,6 +14,7 @@
 
 require_once __DIR__ . "/admin.php";
 require_once __DIR__ . "/paymongo.php";
+require_once __DIR__ . "/tickets.php";
 
 // Updates a guest is told about (the bell). A cancellation only when someone else did it.
 const CUSTOMER_UPDATE_TYPES = [
@@ -48,12 +49,17 @@ function ensure_customer_schema(PDO $pdo): void
     }
 }
 
-// The page the guest was on, to come back to it after logging in ("customer/profile.php").
+// The page the guest was on, to come back to it after logging in ("customer/book.php?room_id=3").
 function customer_here(): string
 {
     $page = basename((string) ($_SERVER["SCRIPT_NAME"] ?? "dashboard.php"));
+    $page = preg_match('/^[a-z_]+\.php$/', $page) ? $page : "dashboard.php";
 
-    return "customer/" . (preg_match('/^[a-z_]+\.php$/', $page) ? $page : "dashboard.php");
+    // only the plain ?a=b&c=d of a page that was opened (never what a form sent)
+    $query = ($_SERVER["REQUEST_METHOD"] ?? "GET") === "GET" ? (string) ($_SERVER["QUERY_STRING"] ?? "") : "";
+    $query = preg_match('/^[A-Za-z0-9_\-=&%.]*$/', $query) ? $query : "";
+
+    return "customer/" . $page . ($query !== "" ? "?" . $query : "");
 }
 
 // The guest's row, or null when nobody (or no active customer) is logged in.
@@ -346,18 +352,18 @@ function customer_event_text(array $event, int $userId): string
         case "reservation.declined":
             return "We could not accept " . $which . ". Its dates are open again.";
         case "reservation.confirmed":
-            return ucfirst($which) . " is confirmed. See you soon!";
+            return ucfirst($which) . " is confirmed. Your ticket is ready.";
         case "reservation.completed":
             return "Thank you for staying with us! Reservation " . $number . " is completed.";
         case "payment.submitted":
             return "You sent a payment" . ($amount !== "" ? " of " . $amount : "") . " for reservation " . $number . "."
                 . (($event["payment_now"] ?? "") === "pending" ? " We will check it soon." : "");
         case "payment.verified":
-            return "Your payment" . ($amount !== "" ? " of " . $amount : "") . " for reservation " . $number . " was verified. Your stay is confirmed.";
+            return "Your payment" . ($amount !== "" ? " of " . $amount : "") . " for reservation " . $number . " was verified. Your stay is confirmed and your ticket is ready.";
         case "payment.rejected":
             return "Your payment for reservation " . $number . " was not accepted. Please send it again.";
         case "payment.online_paid":
-            return "Your online payment" . ($amount !== "" ? " of " . $amount : "") . " for reservation " . $number . " went through. Your stay is confirmed.";
+            return "Your online payment" . ($amount !== "" ? " of " . $amount : "") . " for reservation " . $number . " went through. Your stay is confirmed and your ticket is ready.";
         case "payment.online_cancelled":
             return "The online payment for reservation " . $number . " was not finished. You can try again.";
     }
@@ -384,7 +390,13 @@ function customer_feed(array $events, int $userId, array $options = []): string
     foreach ($events as $event) {
         $isNew = $options["new_since"] !== null && $event["created_at"] > $options["new_since"];
 
-        $html .= '<li><a class="feed-item' . ($isNew ? " is-unread" : "") . '" href="reservations.php?open=' . (int) $event["reservation_id"] . '">'
+        // "your ticket is ready" opens the ticket; the rest open the reservation
+        $href = in_array($event["type"], ["reservation.confirmed", "payment.verified", "payment.online_paid"], true)
+            && in_array($event["reservation_status"], ["confirmed", "completed"], true)
+            ? "ticket.php?id=" . (int) $event["reservation_id"]
+            : "reservations.php?open=" . (int) $event["reservation_id"];
+
+        $html .= '<li><a class="feed-item' . ($isNew ? " is-unread" : "") . '" href="' . $href . '">'
             . '<span class="feed-icon tone-' . activity_tone($event["type"]) . '">' . icon(activity_icon($event["type"])) . '</span>'
             . '<span class="feed-body"><span class="feed-text">' . h(customer_event_text($event, $userId)) . '</span></span>'
             . '<time class="feed-time" datetime="' . h(str_replace(" ", "T", $event["created_at"])) . 'Z" title="'

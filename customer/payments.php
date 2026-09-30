@@ -148,7 +148,7 @@ customer_shell_head([
                                             && !in_array($payment["reservation_status"], ["cancelled", "declined", "completed", "expired"], true);
                                         ?>
                                         <?php if ($again): ?>
-                                            <a class="btn btn-sm btn-primary" href="../payment.php?reservation_id=<?= $reservationId ?>">Pay again</a>
+                                            <a class="btn btn-sm btn-primary" href="pay.php?reservation_id=<?= $reservationId ?>">Pay again</a>
                                         <?php endif; ?>
                                         <a class="btn btn-sm btn-ghost" href="reservations.php?open=<?= $reservationId ?>">Reservation</a>
                                     </div>
